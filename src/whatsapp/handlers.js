@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import logger from '../logger.js';
 import { paths } from '../paths.js';
+import crypto from 'crypto';
 
 const configPath = process.env.SESSIONS_CONFIG_PATH || path.join(paths.configDir, 'sessions.json');
 
@@ -35,6 +36,25 @@ class MessageHandler {
   normalizeDigits(value) {
     if (!value) return '';
     return String(value).replace(/\D/g, '');
+  }
+
+  sanitizePathPart(value) {
+    return String(value || '')
+      .replace(/[^a-zA-Z0-9._-]/g, '_')
+      .slice(0, 64);
+  }
+
+  mimeToExt(mimetype) {
+    switch (String(mimetype || '').toLowerCase()) {
+      case 'image/jpeg':
+        return 'jpg';
+      case 'image/png':
+        return 'png';
+      case 'image/webp':
+        return 'webp';
+      default:
+        return 'bin';
+    }
   }
 
   isAllowed(chatId, contactNumber) {
@@ -107,9 +127,10 @@ class MessageHandler {
   async handleMessage(message) {
     const from = message.from;
     const body = message.body;
+    const hasMedia = message.hasMedia === true;
 
     if (message.fromMe) return;
-    if (!body || body.trim() === '') return;
+    if (!hasMedia && (!body || body.trim() === '')) return;
 
     // Grup mesajlarını direkt yoksay
     if (from.includes('@g.us')) return;
@@ -140,9 +161,14 @@ class MessageHandler {
       return;
     }
 
-    logger.info(`Mesaj alındı [${from}]: ${body.substring(0, 100)}`);
+    logger.info(
+      `Mesaj alındı [${from}]${hasMedia ? ' (media)' : ''}: ${String(body || '').substring(0, 100)}`
+    );
 
-    this.db.logMessage(from, body, 'incoming');
+    const incomingLog = hasMedia
+      ? `[media]${body && body.trim() ? ` ${body.trim()}` : ''}`
+      : body;
+    this.db.logMessage(from, incomingLog, 'incoming');
 
     this.processingQueue.set(from, true);
 
@@ -162,7 +188,66 @@ class MessageHandler {
         }
       }
 
-      const response = await session.execute(body);
+      let images = [];
+      let mediaFilePath = null;
+
+      if (hasMedia) {
+        const maxMediaMb = parseInt(process.env.MAX_MEDIA_MB || '8', 10);
+        const maxBytes = Math.max(1, maxMediaMb) * 1024 * 1024;
+
+        try {
+          const media = await message.downloadMedia();
+          const mimetype = media?.mimetype || '';
+          const data = media?.data || '';
+
+          if (!data) {
+            await this.replyToMessage(message, 'Dosyayı indiremedim, bir daha dener misin?');
+            return;
+          }
+
+          const buffer = Buffer.from(data, 'base64');
+          if (buffer.byteLength > maxBytes) {
+            await this.replyToMessage(
+              message,
+              `Dosya çok büyük (${Math.ceil(buffer.byteLength / 1024 / 1024)}MB). ` +
+                `En fazla ${maxMediaMb}MB gönderebilir misin?`
+            );
+            return;
+          }
+
+          const ext = this.mimeToExt(mimetype);
+          const dir = path.join(paths.dataDir, 'incoming-media', this.sanitizePathPart(from));
+          await fs.promises.mkdir(dir, { recursive: true });
+          mediaFilePath = path.join(
+            dir,
+            `${Date.now()}-${crypto.randomBytes(6).toString('hex')}.${ext}`
+          );
+          await fs.promises.writeFile(mediaFilePath, buffer);
+          images = [mediaFilePath];
+        } catch (e) {
+          logger.error('Media indirme/kaydetme hatası:', e);
+          await this.replyToMessage(message, 'Fotoğrafı alamadım, bir daha yollar mısın?');
+          return;
+        }
+      }
+
+      const prompt =
+        hasMedia && (!body || body.trim() === '')
+          ? 'Kullanıcı bir görsel gönderdi (açıklama yok). Görseli analiz et ve kısa bir cevap ver; gerekiyorsa 1-2 net soru sor.'
+          : body;
+
+      let response;
+      try {
+        response = await session.execute(prompt, { images });
+      } finally {
+        if (mediaFilePath) {
+          try {
+            await fs.promises.unlink(mediaFilePath);
+          } catch {
+            // ignore
+          }
+        }
+      }
 
       if (response) {
         if (response.length > 4000) {

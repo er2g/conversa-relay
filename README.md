@@ -35,6 +35,11 @@ npm run start
 
 İlk çalıştırmada QR kod çıkar; WhatsApp’tan taratınca mesajları dinlemeye başlar.
 
+## Fotoğraf desteği
+
+WhatsApp’tan gönderilen fotoğraflar (caption’lı veya captionsız) Codex’e görsel olarak aktarılır.
+İstersen limit: `MAX_MEDIA_MB` (varsayılan `8`).
+
 ## Güvenlik notu
 
 `data/` ve `config/sessions.json` Git’e alınmaz (session/numara/DB/log içerir). Repo’ya sadece örnek config eklenir.

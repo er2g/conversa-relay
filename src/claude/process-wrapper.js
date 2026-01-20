@@ -105,7 +105,7 @@ class CodexProcess extends EventEmitter {
     return u.length >= 6;
   }
 
-  async runCodex({ mode, message }) {
+  async runCodex({ mode, message, images = [] }) {
     const model = process.env.CODEX_MODEL || 'gpt-5.2';
     const reasoningEffort = process.env.CODEX_REASONING_EFFORT || 'high';
     const workdir = process.env.CODEX_WORKDIR || paths.appRoot;
@@ -131,10 +131,20 @@ class CodexProcess extends EventEmitter {
         args.push('-a', 'never');
       }
 
+      args.push('exec');
+      if (mode === 'resume') {
+        args.push('resume');
+      }
+
+      if (images && images.length) {
+        for (const img of images) {
+          if (!img) continue;
+          args.push('-i', img);
+        }
+      }
+
       if (mode === 'resume') {
         args.push(
-          'exec',
-          'resume',
           '--skip-git-repo-check',
           '--json',
           '-m',
@@ -146,7 +156,6 @@ class CodexProcess extends EventEmitter {
         );
       } else {
         args.push(
-          'exec',
           '--skip-git-repo-check',
           '--json',
           '-m',
@@ -297,7 +306,19 @@ class CodexProcess extends EventEmitter {
     await this.saveThreadState({ threadId: this.threadId, primed: true });
   }
 
-  async execute(userMessage) {
+  async execute(userMessage, options = {}) {
+    const message =
+      userMessage && typeof userMessage === 'object'
+        ? userMessage.message
+        : userMessage;
+
+    const imagesFromMessage =
+      userMessage && typeof userMessage === 'object' && Array.isArray(userMessage.images)
+        ? userMessage.images
+        : [];
+
+    const images = Array.isArray(options.images) ? options.images : imagesFromMessage;
+
     this.lastActivity = new Date();
     this.state = 'executing';
     this.messageCount++;
@@ -305,25 +326,26 @@ class CodexProcess extends EventEmitter {
     await this.loadThreadState();
 
     logger.info(
-      `Codex komutu [${this.id}]${this.threadId ? ` (thread ${this.threadId})` : ''}: ${userMessage.substring(0, 100)}...`
+      `Codex komutu [${this.id}]${this.threadId ? ` (thread ${this.threadId})` : ''}: ${String(message || '').substring(0, 100)}...`
     );
 
     if (this.threadId) {
       await this.ensureThreadPrimed();
-      let response = await this.runCodex({ mode: 'resume', message: userMessage });
+      let response = await this.runCodex({ mode: 'resume', message, images });
 
-      if (this.shouldRetry(userMessage, response)) {
+      if (this.shouldRetry(message, response)) {
         response = await this.runCodex({
           mode: 'resume',
           message:
-            `Önceki cevabın çok kısa/boş. Lütfen kullanıcı mesajına kısa ama açıklayıcı cevap ver; sadece \"Tamam\" yazma.\n\nKullanıcı mesajı: ${userMessage}`
+            `Önceki cevabın çok kısa/boş. Lütfen kullanıcı mesajına kısa ama açıklayıcı cevap ver; sadece \"Tamam\" yazma.\n\nKullanıcı mesajı: ${message}`,
+          images
         });
       }
 
       return response;
     }
 
-    return await this.runCodex({ mode: 'new', message: userMessage });
+    return await this.runCodex({ mode: 'new', message, images });
   }
 
   getStatus() {
