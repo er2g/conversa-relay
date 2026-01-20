@@ -1,0 +1,14 @@
+{
+  "allowedNumbers": [
+    "*"
+  ],
+  "adminNumbers": [],
+  "settings": {
+    "maxConcurrentSessions": 3,
+    "sessionTimeoutMinutes": 30,
+    "rateLimit": {
+      "messagesPerMinute": 20,
+      "cooldownSeconds": 60
+    }
+  }
+}

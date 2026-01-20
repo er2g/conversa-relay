@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WhatsApp Codex Dashboard</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0a0a0a;
+            color: #e0e0e0;
+            min-height: 100vh;
+        }
+        .header {
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            padding: 1.5rem 2rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid #333;
+        }
+        .header h1 { font-size: 1.5rem; color: #fff; }
+        .header h1 span { color: #25D366; }
+        .status-indicator { display: flex; align-items: center; gap: 0.5rem; }
+        .status-dot {
+            width: 12px; height: 12px; border-radius: 50%;
+            background: #ff4444; animation: pulse 2s infinite;
+        }
+        .status-dot.connected { background: #25D366; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+        .main {
+            display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem;
+            padding: 1.5rem; max-width: 1600px; margin: 0 auto;
+        }
+        @media (max-width: 1024px) { .main { grid-template-columns: 1fr; } }
+        .card {
+            background: #1a1a2e; border-radius: 12px;
+            padding: 1.5rem; border: 1px solid #333;
+        }
+        .card-header {
+            display: flex; justify-content: space-between; align-items: center;
+            margin-bottom: 1rem; padding-bottom: 0.75rem; border-bottom: 1px solid #333;
+        }
+        .card-title { font-size: 1.1rem; font-weight: 600; color: #fff; }
+        .stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; margin-bottom: 1.5rem; }
+        @media (max-width: 768px) { .stats-grid { grid-template-columns: repeat(2, 1fr); } }
+        .stat-card { background: #16213e; padding: 1rem; border-radius: 8px; text-align: center; }
+        .stat-value { font-size: 2rem; font-weight: 700; color: #25D366; }
+        .stat-label { font-size: 0.85rem; color: #888; margin-top: 0.25rem; }
+        .qr-container { display: flex; flex-direction: column; align-items: center; padding: 1rem; }
+        .qr-container img { max-width: 300px; border-radius: 8px; background: white; padding: 10px; }
+        .qr-placeholder {
+            width: 250px; height: 250px; background: #16213e; border-radius: 8px;
+            display: flex; align-items: center; justify-content: center;
+            color: #888; font-size: 0.9rem; text-align: center; padding: 1rem;
+        }
+        .connected-status {
+            text-align: center; padding: 2rem;
+        }
+        .connected-status .icon { font-size: 4rem; margin-bottom: 1rem; }
+        .connected-status .text { color: #25D366; font-weight: 600; font-size: 1.2rem; }
+        .connected-status .sub { color: #888; font-size: 0.9rem; margin-top: 0.5rem; }
+        .session-list { max-height: 300px; overflow-y: auto; }
+        .session-item {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 0.75rem; background: #16213e; border-radius: 8px; margin-bottom: 0.5rem;
+        }
+        .session-info { display: flex; flex-direction: column; gap: 0.25rem; }
+        .session-id { font-family: monospace; color: #25D366; }
+        .session-phone { font-size: 0.85rem; color: #888; }
+        .session-state { padding: 0.25rem 0.75rem; border-radius: 4px; font-size: 0.8rem; font-weight: 500; }
+        .session-state.idle { background: #1e3a5f; color: #64b5f6; }
+        .session-state.executing { background: #3d2e0f; color: #ffd54f; }
+        .btn {
+            padding: 0.5rem 1rem; border: none; border-radius: 6px;
+            cursor: pointer; font-size: 0.9rem; transition: all 0.2s;
+        }
+        .btn-danger { background: #dc3545; color: white; }
+        .btn-danger:hover { background: #c82333; }
+        .btn-sm { padding: 0.25rem 0.5rem; font-size: 0.8rem; }
+        .message-list { max-height: 400px; overflow-y: auto; }
+        .message-item { padding: 0.75rem; margin-bottom: 0.5rem; border-radius: 8px; background: #16213e; }
+        .message-item.incoming { border-left: 3px solid #25D366; }
+        .message-item.outgoing { border-left: 3px solid #64b5f6; }
+        .message-header { display: flex; justify-content: space-between; font-size: 0.8rem; color: #888; margin-bottom: 0.5rem; }
+        .message-content { font-size: 0.9rem; word-break: break-word; white-space: pre-wrap; max-height: 100px; overflow: hidden; }
+        .log-container {
+            background: #0d0d0d; border-radius: 8px; padding: 1rem;
+            max-height: 300px; overflow-y: auto; font-family: monospace; font-size: 0.8rem;
+        }
+        .log-line { padding: 0.25rem 0; border-bottom: 1px solid #1a1a1a; }
+        .no-data { text-align: center; color: #666; padding: 2rem; }
+        .full-width { grid-column: 1 / -1; }
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #1a1a1a; }
+        ::-webkit-scrollbar-thumb { background: #333; border-radius: 4px; }
+    </style>
+</head>
+<body>
+    <header class="header">
+        <h1><span>WhatsApp</span> Codex Dashboard</h1>
+        <div class="status-indicator">
+            <div id="statusDot" class="status-dot"></div>
+            <span id="statusText">Bağlanıyor...</span>
+        </div>
+    </header>
+
+    <main class="main">
+        <div class="card full-width">
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-value" id="statSessions">-</div>
+                    <div class="stat-label">Aktif Oturum</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" id="statMessages">-</div>
+                    <div class="stat-label">Bugünkü Mesaj</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" id="statMemory">-</div>
+                    <div class="stat-label">Bellek (MB)</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" id="statUptime">-</div>
+                    <div class="stat-label">Çalışma Süresi</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">WhatsApp Bağlantısı</span>
+                <div style="display: flex; gap: 0.5rem;">
+                    <button class="btn btn-sm" onclick="checkStatus()">Yenile</button>
+                    <button class="btn btn-danger btn-sm" onclick="logoutWhatsApp()">Hesabı Sıfırla</button>
+                </div>
+            </div>
+            <div id="qrContainer" class="qr-container">
+                <div class="qr-placeholder">Durum kontrol ediliyor...</div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">Aktif Oturumlar</span>
+                <button class="btn btn-danger btn-sm" onclick="killAllSessions()">Tümünü Kapat</button>
+            </div>
+            <div id="sessionList" class="session-list">
+                <div class="no-data">Aktif oturum yok</div>
+            </div>
+        </div>
+
+        <div class="card full-width">
+            <div class="card-header">
+                <span class="card-title">Son Mesajlar</span>
+            </div>
+            <div id="messageList" class="message-list">
+                <div class="no-data">Mesaj yok</div>
+            </div>
+        </div>
+
+        <div class="card full-width">
+            <div class="card-header">
+                <span class="card-title">Sistem Logları</span>
+                <button class="btn btn-sm" onclick="refreshLogs()">Yenile</button>
+            </div>
+            <div id="logContainer" class="log-container">
+                <div class="no-data">Log yükleniyor...</div>
+            </div>
+        </div>
+    </main>
+
+    <script>
+        let ws = null;
+        let qrRefreshInterval = null;
+
+        function connectWebSocket() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const basePath = window.location.pathname.replace(/\/$/, '') || '';
+            ws = new WebSocket(`${protocol}//${window.location.host}${basePath}/`);
+
+            ws.onopen = () => {
+                console.log('WebSocket bağlandı');
+                checkStatus(); // Bağlanınca hemen durumu al
+            };
+            ws.onmessage = (event) => handleMessage(JSON.parse(event.data));
+            ws.onclose = () => {
+                console.log('WebSocket kapandı, polling moduna geçiliyor');
+                // WebSocket yoksa polling yap
+                if (!pollingInterval) {
+                    pollingInterval = setInterval(checkStatus, 3000);
+                }
+                setTimeout(connectWebSocket, 5000);
+            };
+            ws.onerror = (err) => {
+                console.error('WebSocket hatası:', err);
+                checkStatus(); // Hata olursa da durumu al
+            };
+        }
+
+        let pollingInterval = null;
+
+        function handleMessage(data) {
+            if (data.type === 'init' || data.type === 'update') {
+                updateWhatsAppStatus(data.data.whatsapp);
+                updateSessions(data.data.sessions);
+                if (data.data.stats) updateStats(data.data.stats);
+            } else if (data.type === 'message') {
+                addMessage(data.data);
+            }
+        }
+
+        function updateStatus(connected) {
+            const dot = document.getElementById('statusDot');
+            const text = document.getElementById('statusText');
+            dot.classList.toggle('connected', connected);
+            text.textContent = connected ? 'Bağlı' : 'QR Bekliyor';
+        }
+
+        function updateWhatsAppStatus(status) {
+            const container = document.getElementById('qrContainer');
+            updateStatus(status.isReady);
+
+            if (status.isReady) {
+                // Bağlı
+                if (qrRefreshInterval) {
+                    clearInterval(qrRefreshInterval);
+                    qrRefreshInterval = null;
+                }
+                container.innerHTML = `
+                    <div class="connected-status">
+                        <div class="icon">✅</div>
+                        <div class="text">WhatsApp Bağlı</div>
+                        <div class="sub">Mesaj alımı aktif</div>
+                    </div>
+                `;
+            } else if (status.hasQR) {
+                // QR var, göster
+                const timestamp = Date.now();
+                container.innerHTML = `
+                    <img src="api/whatsapp/qr.png?t=${timestamp}" alt="QR Code" onerror="this.style.display='none'">
+                    <div style="color: #888; font-size: 0.9rem; margin-top: 1rem; text-align: center;">
+                        WhatsApp'tan QR kodu taratın
+                    </div>
+                `;
+                // QR'ı periyodik yenile (20 saniyede bir)
+                if (!qrRefreshInterval) {
+                    qrRefreshInterval = setInterval(() => {
+                        checkStatus();
+                    }, 20000);
+                }
+            } else {
+                // Bekleniyor
+                container.innerHTML = `
+                    <div class="qr-placeholder">
+                        ${status.connectionState === 'disconnected' ? 'Bağlantı bekleniyor...' : status.connectionState}
+                    </div>
+                `;
+            }
+        }
+
+        async function checkStatus() {
+            try {
+                const response = await fetch('api/whatsapp/status');
+                const status = await response.json();
+                updateWhatsAppStatus(status);
+            } catch (error) {
+                console.error('Status hatası:', error);
+            }
+        }
+
+        function updateSessions(sessions) {
+            const container = document.getElementById('sessionList');
+            document.getElementById('statSessions').textContent = sessions.length;
+
+            if (!sessions.length) {
+                container.innerHTML = '<div class="no-data">Aktif oturum yok</div>';
+                return;
+            }
+
+            container.innerHTML = sessions.map(s => `
+                <div class="session-item">
+                    <div class="session-info">
+                        <span class="session-id">${s.id}</span>
+                        <span class="session-phone">${s.owner.replace('@c.us', '')}</span>
+                    </div>
+                    <div style="display: flex; gap: 0.5rem; align-items: center;">
+                        <span class="session-state ${s.state}">${s.state}</span>
+                        <button class="btn btn-danger btn-sm" onclick="killSession('${s.owner}')">Kapat</button>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function updateStats(stats) {
+            if (stats.todayMessages !== undefined) {
+                document.getElementById('statMessages').textContent = stats.todayMessages;
+            }
+        }
+
+        function addMessage(msg) {
+            const container = document.getElementById('messageList');
+            const noData = container.querySelector('.no-data');
+            if (noData) noData.remove();
+
+            const div = document.createElement('div');
+            div.className = `message-item ${msg.direction}`;
+            div.innerHTML = `
+                <div class="message-header">
+                    <span>${(msg.phoneNumber || '').replace('@c.us', '')}</span>
+                    <span>${new Date(msg.timestamp).toLocaleTimeString('tr-TR')}</span>
+                </div>
+                <div class="message-content">${escapeHtml(msg.message)}</div>
+            `;
+            container.insertBefore(div, container.firstChild);
+            while (container.children.length > 50) container.removeChild(container.lastChild);
+        }
+
+        async function refreshLogs() {
+            try {
+                const response = await fetch('api/logs?lines=50');
+                const data = await response.json();
+                const container = document.getElementById('logContainer');
+                if (data.logs?.length) {
+                    container.innerHTML = data.logs.map(l => `<div class="log-line">${escapeHtml(l)}</div>`).join('');
+                    container.scrollTop = container.scrollHeight;
+                } else {
+                    container.innerHTML = '<div class="no-data">Log yok</div>';
+                }
+            } catch (e) { console.error('Log hatası:', e); }
+        }
+
+        async function killSession(phone) {
+            if (!confirm('Oturumu kapat?')) return;
+            await fetch(`api/sessions/${encodeURIComponent(phone)}`, { method: 'DELETE' });
+        }
+
+        async function killAllSessions() {
+            if (!confirm('TÜM oturumları kapat?')) return;
+            await fetch('api/sessions', { method: 'DELETE' });
+        }
+
+        async function logoutWhatsApp() {
+            if (!confirm('WhatsApp hesabını sıfırlamak istediğine emin misin?\nMevcut bağlantı koparılacak ve yeni QR kod gösterilecek.')) return;
+
+            const container = document.getElementById('qrContainer');
+            container.innerHTML = '<div class="qr-placeholder">Hesap sıfırlanıyor...</div>';
+
+            try {
+                const res = await fetch('api/whatsapp/logout', { method: 'POST' });
+                const data = await res.json();
+                if (data.success) {
+                    // Birkaç saniye bekle ve durumu kontrol et
+                    setTimeout(checkStatus, 3000);
+                } else {
+                    alert('Hata: ' + (data.error || 'Bilinmeyen hata'));
+                    checkStatus();
+                }
+            } catch (e) {
+                alert('Hata: ' + e.message);
+                checkStatus();
+            }
+        }
+
+        async function loadStats() {
+            try {
+                const res = await fetch('api/stats');
+                const data = await res.json();
+                document.getElementById('statMessages').textContent = data.database?.todayMessages || 0;
+                document.getElementById('statMemory').textContent = data.memory?.heapUsed || '-';
+                document.getElementById('statUptime').textContent = formatUptime(data.uptime || 0);
+            } catch (e) { console.error('Stats hatası:', e); }
+        }
+
+        async function loadMessages() {
+            try {
+                const res = await fetch('api/messages?limit=20');
+                const msgs = await res.json();
+                const container = document.getElementById('messageList');
+                if (msgs?.length) {
+                    container.innerHTML = msgs.reverse().map(m => `
+                        <div class="message-item ${m.direction}">
+                            <div class="message-header">
+                                <span>${(m.phone_number || '').replace('@c.us', '')}</span>
+                                <span>${new Date(m.created_at).toLocaleTimeString('tr-TR')}</span>
+                            </div>
+                            <div class="message-content">${escapeHtml(m.message)}</div>
+                        </div>
+                    `).join('');
+                }
+            } catch (e) { console.error('Mesaj hatası:', e); }
+        }
+
+        function formatUptime(sec) {
+            const h = Math.floor(sec / 3600);
+            const m = Math.floor((sec % 3600) / 60);
+            return h > 0 ? `${h}s ${m}d` : `${m}d`;
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text || '';
+            return div.innerHTML;
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            // Önce durumu al, sonra WebSocket dene
+            checkStatus();
+            loadStats();
+            loadMessages();
+            refreshLogs();
+
+            // WebSocket'i dene
+            connectWebSocket();
+
+            // Periyodik güncellemeler
+            setInterval(loadStats, 30000);
+            setInterval(refreshLogs, 60000);
+
+            // Fallback polling (WebSocket çalışmazsa)
+            setTimeout(() => {
+                if (!ws || ws.readyState !== WebSocket.OPEN) {
+                    console.log('WebSocket bağlanamadı, polling başlatılıyor');
+                    pollingInterval = setInterval(checkStatus, 3000);
+                }
+            }, 3000);
+        });
+    </script>
+</body>
+</html>
