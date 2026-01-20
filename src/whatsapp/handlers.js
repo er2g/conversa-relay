@@ -14,6 +14,7 @@ class MessageHandler {
     this.config = this.loadConfig();
     this.rateLimitMap = new Map();
     this.processingQueue = new Map();
+    this.pendingMessages = new Map(); // chatId -> Message[]
   }
 
   loadConfig() {
@@ -124,6 +125,125 @@ class MessageHandler {
     return true;
   }
 
+  getPendingQueue(chatId) {
+    if (!this.pendingMessages.has(chatId)) {
+      this.pendingMessages.set(chatId, []);
+    }
+    return this.pendingMessages.get(chatId);
+  }
+
+  async processOneMessage(message) {
+    const from = message.from;
+    const body = message.body;
+    const hasMedia = message.hasMedia === true;
+
+    try {
+      let session = this.sessionManager.getSession(from);
+
+      if (!session) {
+        try {
+          session = await this.sessionManager.createSession(from);
+          logger.info(`Yeni oturum oluşturuldu: ${from}`);
+        } catch (error) {
+          const txt = `Şu an çok yoğunum, biraz sonra tekrar yaz.\n(${error.message})`;
+          await this.replyToMessage(message, txt);
+          this.db.logMessage(from, txt, 'outgoing');
+          return;
+        }
+      }
+
+      let images = [];
+      let mediaFilePath = null;
+
+      if (hasMedia) {
+        const maxMediaMb = parseInt(process.env.MAX_MEDIA_MB || '8', 10);
+        const maxBytes = Math.max(1, maxMediaMb) * 1024 * 1024;
+
+        try {
+          const media = await message.downloadMedia();
+          const mimetype = media?.mimetype || '';
+          const data = media?.data || '';
+
+          if (!data) {
+            const txt = 'Dosyayı indiremedim, bir daha dener misin?';
+            await this.replyToMessage(message, txt);
+            this.db.logMessage(from, txt, 'outgoing');
+            return;
+          }
+
+          const buffer = Buffer.from(data, 'base64');
+          if (buffer.byteLength > maxBytes) {
+            const txt =
+              `Dosya çok büyük (${Math.ceil(buffer.byteLength / 1024 / 1024)}MB). ` +
+              `En fazla ${maxMediaMb}MB gönderebilir misin?`;
+            await this.replyToMessage(message, txt);
+            this.db.logMessage(from, txt, 'outgoing');
+            return;
+          }
+
+          const ext = this.mimeToExt(mimetype);
+          const dir = path.join(paths.dataDir, 'incoming-media', this.sanitizePathPart(from));
+          await fs.promises.mkdir(dir, { recursive: true });
+          mediaFilePath = path.join(
+            dir,
+            `${Date.now()}-${crypto.randomBytes(6).toString('hex')}.${ext}`
+          );
+          await fs.promises.writeFile(mediaFilePath, buffer);
+          images = [mediaFilePath];
+        } catch (e) {
+          logger.error('Media indirme/kaydetme hatası:', e);
+          const txt = 'Fotoğrafı alamadım, bir daha yollar mısın?';
+          await this.replyToMessage(message, txt);
+          this.db.logMessage(from, txt, 'outgoing');
+          return;
+        }
+      }
+
+      const prompt =
+        hasMedia && (!body || body.trim() === '')
+          ? 'Kullanıcı bir görsel gönderdi (açıklama yok). Görseli analiz et ve kısa bir cevap ver; gerekiyorsa 1-2 net soru sor.'
+          : body;
+
+      let response;
+      try {
+        response = await session.execute(prompt, { images });
+      } finally {
+        if (mediaFilePath) {
+          try {
+            await fs.promises.unlink(mediaFilePath);
+          } catch {
+            // ignore
+          }
+        }
+      }
+
+      if (response) {
+        if (response.length > 4000) {
+          const chunks = this.splitMessage(response, 4000);
+          for (let i = 0; i < chunks.length; i++) {
+            await this.replyToMessage(message, chunks[i]);
+            this.db.logMessage(from, chunks[i], 'outgoing');
+            if (i < chunks.length - 1) {
+              await this.sleep(500);
+            }
+          }
+        } else {
+          await this.replyToMessage(message, response);
+          this.db.logMessage(from, response, 'outgoing');
+        }
+      }
+    } catch (error) {
+      logger.error('Mesaj işleme hatası:', error);
+      try {
+        const txt = `Bir hata oluştu: ${error.message}\nTekrar dener misin?`;
+        await this.replyToMessage(message, txt);
+        this.db.logMessage(from, txt, 'outgoing');
+      } catch (sendError) {
+        logger.error('Hata mesajı gönderilemedi:', sendError.message);
+      }
+    }
+  }
+
   async handleMessage(message) {
     const from = message.from;
     const body = message.body;
@@ -153,11 +273,7 @@ class MessageHandler {
     // Rate limit kontrolü
     if (!this.checkRateLimit(from)) {
       await this.replyToMessage(message, 'Yavaş ol biraz, çok hızlı mesaj atıyorsun.');
-      return;
-    }
-
-    if (this.processingQueue.get(from)) {
-      await this.replyToMessage(message, 'Bir önceki mesajın hala işleniyor, biraz bekle...');
+      this.db.logMessage(from, 'Yavaş ol biraz, çok hızlı mesaj atıyorsun.', 'outgoing');
       return;
     }
 
@@ -170,111 +286,34 @@ class MessageHandler {
       : body;
     this.db.logMessage(from, incomingLog, 'incoming');
 
+    if (this.processingQueue.get(from)) {
+      const queue = this.getPendingQueue(from);
+      const maxQueue = parseInt(process.env.MAX_QUEUE_PER_CHAT || '10', 10);
+      if (queue.length >= maxQueue) {
+        const txt = `Şu an çok yoğunum. Bekleyen mesaj sayın ${queue.length}. Biraz bekleyip tekrar yazar mısın?`;
+        await this.replyToMessage(message, txt);
+        this.db.logMessage(from, txt, 'outgoing');
+        return;
+      }
+
+      queue.push(message);
+      const txt = `Şu an işteyim; mesajını sıraya aldım. (Bekleyen: ${queue.length})`;
+      await this.replyToMessage(message, txt);
+      this.db.logMessage(from, txt, 'outgoing');
+      return;
+    }
+
     this.processingQueue.set(from, true);
-
     try {
-      let session = this.sessionManager.getSession(from);
+      await this.processOneMessage(message);
 
-      if (!session) {
-        try {
-          session = await this.sessionManager.createSession(from);
-          logger.info(`Yeni oturum oluşturuldu: ${from}`);
-        } catch (error) {
-          await this.replyToMessage(
-            message,
-            `Şu an çok yoğunum, biraz sonra tekrar yaz.\n(${error.message})`
-          );
-          return;
-        }
-      }
-
-      let images = [];
-      let mediaFilePath = null;
-
-      if (hasMedia) {
-        const maxMediaMb = parseInt(process.env.MAX_MEDIA_MB || '8', 10);
-        const maxBytes = Math.max(1, maxMediaMb) * 1024 * 1024;
-
-        try {
-          const media = await message.downloadMedia();
-          const mimetype = media?.mimetype || '';
-          const data = media?.data || '';
-
-          if (!data) {
-            await this.replyToMessage(message, 'Dosyayı indiremedim, bir daha dener misin?');
-            return;
-          }
-
-          const buffer = Buffer.from(data, 'base64');
-          if (buffer.byteLength > maxBytes) {
-            await this.replyToMessage(
-              message,
-              `Dosya çok büyük (${Math.ceil(buffer.byteLength / 1024 / 1024)}MB). ` +
-                `En fazla ${maxMediaMb}MB gönderebilir misin?`
-            );
-            return;
-          }
-
-          const ext = this.mimeToExt(mimetype);
-          const dir = path.join(paths.dataDir, 'incoming-media', this.sanitizePathPart(from));
-          await fs.promises.mkdir(dir, { recursive: true });
-          mediaFilePath = path.join(
-            dir,
-            `${Date.now()}-${crypto.randomBytes(6).toString('hex')}.${ext}`
-          );
-          await fs.promises.writeFile(mediaFilePath, buffer);
-          images = [mediaFilePath];
-        } catch (e) {
-          logger.error('Media indirme/kaydetme hatası:', e);
-          await this.replyToMessage(message, 'Fotoğrafı alamadım, bir daha yollar mısın?');
-          return;
-        }
-      }
-
-      const prompt =
-        hasMedia && (!body || body.trim() === '')
-          ? 'Kullanıcı bir görsel gönderdi (açıklama yok). Görseli analiz et ve kısa bir cevap ver; gerekiyorsa 1-2 net soru sor.'
-          : body;
-
-      let response;
-      try {
-        response = await session.execute(prompt, { images });
-      } finally {
-        if (mediaFilePath) {
-          try {
-            await fs.promises.unlink(mediaFilePath);
-          } catch {
-            // ignore
-          }
-        }
-      }
-
-      if (response) {
-        if (response.length > 4000) {
-          const chunks = this.splitMessage(response, 4000);
-          for (let i = 0; i < chunks.length; i++) {
-            await this.replyToMessage(message, chunks[i]);
-            if (i < chunks.length - 1) {
-              await this.sleep(500);
-            }
-          }
-        } else {
-          await this.replyToMessage(message, response);
-        }
-
-        this.db.logMessage(from, response, 'outgoing');
-      }
-    } catch (error) {
-      logger.error('Mesaj işleme hatası:', error);
-      try {
-        await this.replyToMessage(
-          message,
-          `Bir hata oluştu: ${error.message}\nTekrar dener misin?`
-        );
-      } catch (sendError) {
-        logger.error('Hata mesajı gönderilemedi:', sendError.message);
+      const queue = this.getPendingQueue(from);
+      while (queue.length) {
+        const next = queue.shift();
+        await this.processOneMessage(next);
       }
     } finally {
+      this.pendingMessages.delete(from);
       this.processingQueue.set(from, false);
     }
   }
