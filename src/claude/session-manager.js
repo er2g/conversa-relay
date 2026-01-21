@@ -1,19 +1,25 @@
 import { v4 as uuidv4 } from 'uuid';
+import ClaudeProcess from './claude-process.js';
 import CodexProcess from './process-wrapper.js';
 import logger from '../logger.js';
 import { maskPhoneLike } from '../utils/redact.js';
 
 class SessionManager {
   constructor(db, maxSessions = 3, timeoutMinutes = 30) {
-    this.sessions = new Map(); // phoneNumber -> CodexProcess
+    this.sessions = new Map(); // phoneNumber -> ClaudeProcess | CodexProcess
     this.db = db;
     this.maxSessions = maxSessions;
     this.timeoutMinutes = timeoutMinutes;
+
+    // Orkestratör tipi: 'claude' (varsayılan) veya 'codex'
+    this.orchestratorType = process.env.ORCHESTRATOR_TYPE || 'claude';
 
     // Periyodik timeout kontrolü
     this.cleanupInterval = setInterval(() => {
       this.cleanupTimedOutSessions();
     }, 60000);
+
+    logger.info(`Session Manager başlatıldı - Orkestratör: ${this.orchestratorType.toUpperCase()}`);
   }
 
   async createSession(phoneNumber) {
@@ -34,7 +40,14 @@ class SessionManager {
     }
 
     const sessionId = uuidv4().substring(0, 8);
-    const session = new CodexProcess(sessionId, phoneNumber);
+
+    // Orkestratör tipine göre process oluştur
+    let session;
+    if (this.orchestratorType === 'codex') {
+      session = new CodexProcess(sessionId, phoneNumber);
+    } else {
+      session = new ClaudeProcess(sessionId, phoneNumber);
+    }
 
     session.on('output', (data) => {
       logger.debug(`[${sessionId}] Output: ${data.substring(0, 100)}...`);
@@ -48,7 +61,7 @@ class SessionManager {
 
     this.db.createSession(sessionId, phoneNumber);
 
-    logger.info(`Yeni oturum oluşturuldu: ${sessionId} için ${maskPhoneLike(phoneNumber)}`);
+    logger.info(`Yeni oturum oluşturuldu: ${sessionId} için ${maskPhoneLike(phoneNumber)} (${this.orchestratorType})`);
 
     return session;
   }
