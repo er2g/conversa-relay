@@ -18,6 +18,7 @@ class APIServer {
     this.server = createServer(this.app);
     this.wss = new WebSocketServer({ server: this.server });
     this.clients = new Set();
+    this._broadcastInterval = null;
 
     this.setupMiddleware();
     this.setupRoutes();
@@ -246,7 +247,7 @@ class APIServer {
     });
 
     // Periyodik güncelleme gönder
-    setInterval(() => {
+    this._broadcastInterval = setInterval(() => {
       this.broadcast({
         type: 'update',
         data: {
@@ -300,6 +301,10 @@ class APIServer {
 
   stop() {
     return new Promise((resolve) => {
+      if (this._broadcastInterval) {
+        clearInterval(this._broadcastInterval);
+        this._broadcastInterval = null;
+      }
       this.wss.close();
       this.server.close(() => {
         logger.info('API server kapatıldı');

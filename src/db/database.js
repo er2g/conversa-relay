@@ -87,6 +87,44 @@ class DB {
           CREATE INDEX IF NOT EXISTS idx_metrics_name ON metrics(metric_name);
           CREATE INDEX IF NOT EXISTS idx_metrics_recorded ON metrics(recorded_at);
         `
+      },
+      {
+        name: '002_incoming_media',
+        sql: `
+          CREATE TABLE IF NOT EXISTS incoming_media (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id TEXT NOT NULL,
+            message_id TEXT,
+            media_type TEXT NOT NULL CHECK(media_type IN ('document', 'audio', 'video', 'other')),
+            mimetype TEXT,
+            size_bytes INTEGER NOT NULL,
+            original_name TEXT,
+            stored_rel_path TEXT NOT NULL,
+            stored_filename TEXT NOT NULL,
+            created_at DATETIME NOT NULL,
+            stored_at DATETIME DEFAULT CURRENT_TIMESTAMP
+          );
+
+          CREATE INDEX IF NOT EXISTS idx_incoming_media_chat ON incoming_media(chat_id);
+          CREATE INDEX IF NOT EXISTS idx_incoming_media_type ON incoming_media(media_type);
+          CREATE INDEX IF NOT EXISTS idx_incoming_media_created ON incoming_media(created_at);
+        `
+      },
+      {
+        name: '003_last_saved_files',
+        sql: `
+          CREATE TABLE IF NOT EXISTS last_saved_files (
+            chat_id TEXT PRIMARY KEY,
+            message_id TEXT,
+            mimetype TEXT,
+            size_bytes INTEGER NOT NULL,
+            absolute_path TEXT NOT NULL,
+            created_at DATETIME NOT NULL,
+            saved_at DATETIME DEFAULT CURRENT_TIMESTAMP
+          );
+
+          CREATE INDEX IF NOT EXISTS idx_last_saved_files_created ON last_saved_files(created_at);
+        `
       }
     ];
 
@@ -216,6 +254,109 @@ class DB {
       ORDER BY recorded_at ASC
     `);
     return stmt.all(name, hours);
+  }
+
+  // Incoming media
+  addIncomingMedia({
+    chatId,
+    messageId = null,
+    mediaType,
+    mimetype = null,
+    sizeBytes,
+    originalName = null,
+    storedRelPath,
+    storedFilename,
+    createdAt
+  }) {
+    const stmt = this.db.prepare(`
+      INSERT INTO incoming_media (
+        chat_id,
+        message_id,
+        media_type,
+        mimetype,
+        size_bytes,
+        original_name,
+        stored_rel_path,
+        stored_filename,
+        created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    return stmt.run(
+      chatId,
+      messageId,
+      mediaType,
+      mimetype,
+      sizeBytes,
+      originalName,
+      storedRelPath,
+      storedFilename,
+      createdAt
+    );
+  }
+
+  getIncomingMediaById(id) {
+    const stmt = this.db.prepare(`
+      SELECT *
+      FROM incoming_media
+      WHERE id = ?
+    `);
+    return stmt.get(id) || null;
+  }
+
+  listIncomingMedia({ limit = 50, mediaType = null } = {}) {
+    const safeLimit = Math.max(1, Math.min(500, Number(limit) || 50));
+
+    if (mediaType && mediaType !== 'all') {
+      const stmt = this.db.prepare(`
+        SELECT *
+        FROM incoming_media
+        WHERE media_type = ?
+        ORDER BY id DESC
+        LIMIT ?
+      `);
+      return stmt.all(mediaType, safeLimit);
+    }
+
+    const stmt = this.db.prepare(`
+      SELECT *
+      FROM incoming_media
+      ORDER BY id DESC
+      LIMIT ?
+    `);
+    return stmt.all(safeLimit);
+  }
+
+  // Last saved file per chat
+  setLastSavedFile({ chatId, messageId = null, mimetype = null, sizeBytes, absolutePath, createdAt }) {
+    const stmt = this.db.prepare(`
+      INSERT INTO last_saved_files (
+        chat_id,
+        message_id,
+        mimetype,
+        size_bytes,
+        absolute_path,
+        created_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(chat_id) DO UPDATE SET
+        message_id = excluded.message_id,
+        mimetype = excluded.mimetype,
+        size_bytes = excluded.size_bytes,
+        absolute_path = excluded.absolute_path,
+        created_at = excluded.created_at,
+        saved_at = CURRENT_TIMESTAMP
+    `);
+
+    return stmt.run(chatId, messageId, mimetype, sizeBytes, absolutePath, createdAt);
+  }
+
+  getLastSavedFile(chatId) {
+    const stmt = this.db.prepare(`
+      SELECT *
+      FROM last_saved_files
+      WHERE chat_id = ?
+    `);
+    return stmt.get(chatId) || null;
   }
 
   // İstatistikler

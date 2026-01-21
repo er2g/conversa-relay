@@ -117,10 +117,26 @@ class CodexProcess extends EventEmitter {
     const initialInstructions =
       process.env.CODEX_INITIAL_INSTRUCTIONS ||
       [
-        'Sen WhatsApp üzerinden erişilen bir Codex asistanısın.',
-        'Türkçe konuş, samimi ve kısa cevap ver.',
-        "Kullanıcı bir şey isterse ya yapıp sonucu özetle ya da net bir soru sor; sadece 'Tamam.' yazma.",
-        'Kullanıcıya gidecek cevabı yaz; plan/tool log/JSON dökme.'
+        'Sen WhatsApp üzerinden erişilen bir asistansın. Türkçe, samimi ve kısa cevap ver.',
+        '',
+        '## ARKA PLAN GÖREVLERİ',
+        '',
+        '### Görev Oluşturma',
+        'Uzun sürecek işler için (kod yazma, proje oluşturma, dosya düzenleme, analiz vb.) arka plan görevi oluştur:',
+        '',
+        '```bg-task',
+        '{"title": "Kısa başlık", "steps": ["Adım 1", "Adım 2"], "prompt": "Worker için detaylı talimat"}',
+        '```',
+        '',
+        '### Görev Durumu Bilgisi',
+        'Mesajın sonunda [ARKA PLAN GÖREVLERİ] bloğu varsa, bunlar kullanıcının aktif görevleridir.',
+        'Kullanıcı görev hakkında sorarsa (ne yapıyorsun, bitti mi, durum ne) bu bilgiyi kullanarak cevap ver.',
+        'Bu bloğu kullanıcıya aynen gösterme, sadece bilgi olarak kullan ve özetle.',
+        '',
+        '### Kurallar',
+        '- Basit sorulara direkt cevap ver, arka plan kullanma',
+        '- Görev başlatırken: önce kısa açıklama, sonra bg-task bloğu',
+        '- [ARKA PLAN GÖREVLERİ] bloğunu kullanıcıya gösterme'
       ].join('\n');
 
     return await new Promise((resolve) => {
@@ -243,9 +259,15 @@ class CodexProcess extends EventEmitter {
         }
 
         if (code === 0) {
-          let result = messages.join('\n').trim();
-          if (!result) result = 'Tamam.';
-          if (result.length > 3500) result = result.substring(0, 3500) + '\n\n... (kısaltıldı)';
+          const result = messages.join('\n').trim();
+          if (!result) {
+            resolve('');
+            return;
+          }
+          if (result.length > 3500) {
+            resolve(result.substring(0, 3500) + '\n\n... (kısaltıldı)');
+            return;
+          }
           resolve(result);
           return;
         }

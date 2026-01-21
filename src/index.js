@@ -7,10 +7,12 @@ import logger from './logger.js';
 import fs from 'fs';
 import path from 'path';
 import { paths } from './paths.js';
+import { taskManager } from './background/task-manager.js';
 
 const API_PORT = process.env.API_PORT || 3000;
 const MAX_SESSIONS = parseInt(process.env.MAX_SESSIONS) || 3;
 const SESSION_TIMEOUT = parseInt(process.env.SESSION_TIMEOUT) || 30;
+const MAINTENANCE_LOCK = path.join(paths.dataDir, 'maintenance.lock');
 
 // Conversations dizinini oluştur
 const conversationsDir = path.join(paths.dataDir, 'conversations');
@@ -34,10 +36,17 @@ class WhatsAppCodexApp {
     logger.info('='.repeat(50));
 
     try {
+      await this.waitForMaintenanceClear();
+
       // Veritabanı başlat
       logger.info('Veritabanı başlatılıyor...');
       this.db = new DB();
       this.db.initialize();
+
+      // Arka plan görev yöneticisi
+      logger.info('Arka plan görev yöneticisi başlatılıyor...');
+      await taskManager.loadTasks();
+      await taskManager.cleanOldTasks();
 
       // Session manager
       logger.info('Oturum yöneticisi başlatılıyor...');
@@ -117,6 +126,23 @@ class WhatsAppCodexApp {
     });
     process.on('unhandledRejection', (reason, promise) => {
       logger.error('İşlenmeyen promise reddi:', reason);
+    });
+  }
+
+  async waitForMaintenanceClear() {
+    if (!fs.existsSync(MAINTENANCE_LOCK)) return;
+
+    logger.warn(`Maintenance modu aktif: ${MAINTENANCE_LOCK}`);
+    logger.warn('Lock kaldırılana kadar başlatma beklemede.');
+
+    await new Promise((resolve) => {
+      const interval = setInterval(() => {
+        if (!fs.existsSync(MAINTENANCE_LOCK)) {
+          clearInterval(interval);
+          logger.info('Maintenance lock kaldırıldı, başlatma devam ediyor...');
+          resolve();
+        }
+      }, 3000);
     });
   }
 

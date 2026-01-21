@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import CodexProcess from './process-wrapper.js';
 import logger from '../logger.js';
+import { maskPhoneLike } from '../utils/redact.js';
 
 class SessionManager {
   constructor(db, maxSessions = 3, timeoutMinutes = 30) {
@@ -47,7 +48,7 @@ class SessionManager {
 
     this.db.createSession(sessionId, phoneNumber);
 
-    logger.info(`Yeni oturum oluşturuldu: ${sessionId} için ${phoneNumber}`);
+    logger.info(`Yeni oturum oluşturuldu: ${sessionId} için ${maskPhoneLike(phoneNumber)}`);
 
     return session;
   }

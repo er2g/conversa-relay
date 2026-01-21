@@ -3,6 +3,8 @@ node_modules/
 # Runtime data (sessions, DB, logs, conversations)
 data/
 .wwebjs_cache/
+reports/
+.tmp-wp-web-plus/
 
 # Local config (contains phone/admin identifiers)
 config/sessions.json

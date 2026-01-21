@@ -1,8 +1,10 @@
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 import logger from '../logger.js';
 import { paths } from '../paths.js';
-import crypto from 'crypto';
+import { taskManager } from '../background/task-manager.js';
+import { maskPhoneLike } from '../utils/redact.js';
 
 const configPath = process.env.SESSIONS_CONFIG_PATH || path.join(paths.configDir, 'sessions.json');
 
@@ -13,8 +15,9 @@ class MessageHandler {
     this.db = db;
     this.config = this.loadConfig();
     this.rateLimitMap = new Map();
-    this.processingQueue = new Map();
-    this.pendingMessages = new Map(); // chatId -> Message[]
+    this.processingQueue = new Map(); // chatId -> boolean
+    this.pendingJobs = new Map(); // chatId -> Job[]
+    this.lastSavedFileByChat = new Map(); // chatId -> last file info
   }
 
   loadConfig() {
@@ -46,20 +49,128 @@ class MessageHandler {
   }
 
   mimeToExt(mimetype) {
-    switch (String(mimetype || '').toLowerCase()) {
+    const normalized = this.normalizeMimetype(mimetype);
+    switch (normalized) {
       case 'image/jpeg':
         return 'jpg';
       case 'image/png':
         return 'png';
       case 'image/webp':
         return 'webp';
+      case 'application/pdf':
+        return 'pdf';
+      case 'text/plain':
+        return 'txt';
+      case 'application/zip':
+        return 'zip';
+      case 'application/json':
+        return 'json';
+      case 'audio/mpeg':
+        return 'mp3';
+      case 'audio/ogg':
+        return 'ogg';
+      case 'audio/opus':
+        return 'opus';
+      case 'audio/wav':
+        return 'wav';
+      case 'video/mp4':
+        return 'mp4';
+      case 'video/quicktime':
+        return 'mov';
       default:
+        if (normalized.startsWith('image/')) return 'img';
+        if (normalized.startsWith('audio/')) return 'audio';
+        if (normalized.startsWith('video/')) return 'video';
         return 'bin';
     }
   }
 
+  normalizeMimetype(mimetype) {
+    return String(mimetype || '')
+      .split(';')[0]
+      .trim()
+      .toLowerCase();
+  }
+
+  mediaTypeFromMimetype(mimetype) {
+    const normalized = this.normalizeMimetype(mimetype);
+    if (normalized.startsWith('image/')) return 'image';
+    if (normalized.startsWith('audio/')) return 'audio';
+    if (normalized.startsWith('video/')) return 'video';
+    if (normalized) return 'document';
+    return 'other';
+  }
+
+  getMaxMediaBytes(mediaType) {
+    const fallbackMb = parseInt(process.env.MAX_MEDIA_MB || '8', 10);
+    const perTypeMap = {
+      image: parseInt(process.env.MAX_IMAGE_MEDIA_MB || '', 10),
+      document: parseInt(process.env.MAX_DOC_MEDIA_MB || '', 10),
+      audio: parseInt(process.env.MAX_AUDIO_MEDIA_MB || '', 10),
+      video: parseInt(process.env.MAX_VIDEO_MEDIA_MB || '', 10),
+      other: parseInt(process.env.MAX_OTHER_MEDIA_MB || '', 10)
+    };
+
+    const selected = Number.isFinite(perTypeMap[mediaType]) ? perTypeMap[mediaType] : NaN;
+    const mb = Number.isFinite(selected) && selected > 0 ? selected : fallbackMb;
+    return Math.max(1, mb) * 1024 * 1024;
+  }
+
+  estimateBase64Bytes(base64) {
+    const s = String(base64 || '');
+    const len = s.length;
+    if (len === 0) return 0;
+    const padding = s.endsWith('==') ? 2 : s.endsWith('=') ? 1 : 0;
+    return Math.floor((len * 3) / 4) - padding;
+  }
+
+  getMessageId(message) {
+    return message?.id?._serialized || message?.id?.id || null;
+  }
+
+  getMessageCreatedAtISO(message) {
+    const ts = Number(message?.timestamp);
+    if (Number.isFinite(ts) && ts > 0) {
+      return new Date(ts * 1000).toISOString();
+    }
+    return new Date().toISOString();
+  }
+
+  getMediaOriginalName(message) {
+    const candidates = [
+      message?._data?.filename,
+      message?._data?.fileName,
+      message?._data?.mediaData?.filename,
+      message?.filename,
+      message?.fileName
+    ];
+    for (const c of candidates) {
+      if (typeof c === 'string' && c.trim()) return c.trim();
+    }
+    return null;
+  }
+
+  makeSafeStoredFilename({ originalName, mimetype }) {
+    const extFromName = originalName ? path.extname(originalName).replace(/^\./, '') : '';
+    const safeExtFromName = extFromName && /^[a-zA-Z0-9]{1,8}$/.test(extFromName) ? extFromName : '';
+    const ext = safeExtFromName || this.mimeToExt(mimetype);
+
+    const baseFromName = originalName ? path.basename(originalName, path.extname(originalName)) : 'file';
+    const safeBase = this.sanitizePathPart(baseFromName).slice(0, 48) || 'file';
+    const rand = crypto.randomBytes(6).toString('hex');
+    const ts = Date.now();
+
+    return `${ts}-${rand}-${safeBase}.${ext}`;
+  }
+
+  formatBytesForUser(bytes) {
+    const n = Number(bytes) || 0;
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
+    return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  }
+
   isAllowed(chatId, contactNumber) {
-    // Grup mesajlarını yoksay (güvenlik için)
     if (chatId.includes('@g.us')) {
       return false;
     }
@@ -67,7 +178,6 @@ class MessageHandler {
     const allowed = this.config.allowedNumbers || [];
     const admins = this.config.adminNumbers || [];
 
-    // Whitelist boşsa veya "*" varsa herkese izin ver
     if (allowed.length === 0 || allowed.includes('*')) {
       return true;
     }
@@ -126,121 +236,406 @@ class MessageHandler {
   }
 
   getPendingQueue(chatId) {
-    if (!this.pendingMessages.has(chatId)) {
-      this.pendingMessages.set(chatId, []);
+    if (!this.pendingJobs.has(chatId)) {
+      this.pendingJobs.set(chatId, []);
     }
-    return this.pendingMessages.get(chatId);
+    return this.pendingJobs.get(chatId);
+  }
+
+  createJob(message) {
+    return {
+      id: crypto.randomBytes(4).toString('hex'),
+      createdAt: new Date(),
+      message
+    };
+  }
+
+  /**
+   * AI'ın hazırladığı plan ile arka plan görevi başlat
+   * taskPlan: { title, steps[], prompt }
+   */
+  async startBackgroundTask(message, taskPlan, images = []) {
+    const from = message.from;
+    const maxTasks = parseInt(process.env.MAX_BG_TASKS_PER_USER || '3', 10);
+
+    // Aktif görev limiti kontrol
+    const activeCount = taskManager.getActiveTaskCount(from);
+    if (activeCount >= maxTasks) {
+      return null; // Limit aşıldı, normal akışa devam
+    }
+
+    const { title, steps, prompt } = taskPlan;
+    const description = title || (prompt.length > 50 ? prompt.substring(0, 50) + '...' : prompt);
+
+    // Görevi başlat
+    const task = await taskManager.startTask({
+      owner: from,
+      description,
+      prompt,
+      images,
+      onComplete: async (completedTask) => {
+        try {
+          let resultText;
+          if (completedTask.status === 'completed') {
+            resultText = `✅ *Görev tamamlandı: ${completedTask.description}*\n\n` +
+              `${completedTask.result}`;
+          } else if (completedTask.status === 'failed') {
+            resultText = `❌ *Görev başarısız: ${completedTask.description}*\n\n` +
+              `Hata: ${completedTask.error}`;
+          } else if (completedTask.status === 'timeout') {
+            resultText = `⏰ *Görev zaman aşımı: ${completedTask.description}*`;
+          } else {
+            resultText = `ℹ️ Görev durumu: ${completedTask.status}`;
+          }
+
+          await this.replyToMessage(message, resultText);
+          this.db.logMessage(from, resultText, 'outgoing');
+        } catch (e) {
+          logger.error('Görev sonucu gönderme hatası:', e);
+        }
+      }
+    });
+
+    // Kullanıcıya gösterilecek mesaj (AI'ın hazırladığı plan)
+    let userMessage = `🚀 *${title}*\n\n`;
+
+    if (steps && steps.length > 0) {
+      userMessage += `📋 Plan:\n`;
+      steps.forEach((step, i) => {
+        userMessage += `${i + 1}. ${step}\n`;
+      });
+      userMessage += '\n';
+    }
+
+    userMessage += `_Arka planda çalışıyorum, bitince haber vereceğim. Şimdi başka bir şey sorabilirsin!_`;
+
+    return userMessage;
+  }
+
+  /**
+   * Görev listesi göster
+   */
+  getTaskListMessage(from) {
+    const tasks = taskManager.getTasksForOwner(from);
+    if (tasks.length === 0) {
+      return 'Henüz hiç arka plan görevin yok.';
+    }
+
+    const lines = ['📋 *Arka Plan Görevlerin:*\n'];
+    for (const task of tasks.slice(0, 10)) {
+      const status = {
+        'running': '🔄 Çalışıyor',
+        'completed': '✅ Tamamlandı',
+        'failed': '❌ Başarısız',
+        'timeout': '⏰ Zaman aşımı',
+        'cancelled': '🚫 İptal edildi',
+        'interrupted': '⚠️ Kesildi'
+      }[task.status] || '❓ Bilinmiyor';
+
+      const duration = this.getTaskDuration(task);
+      lines.push(`${status}`);
+      lines.push(`  📝 ${task.description}`);
+      lines.push(`  🆔 \`${task.id}\``);
+      lines.push(`  ⏱️ ${duration}`);
+      lines.push('');
+    }
+
+    return lines.join('\n');
+  }
+
+  getTaskDuration(task) {
+    const start = new Date(task.createdAt);
+    const end = task.completedAt ? new Date(task.completedAt) : new Date();
+    const diffMs = end - start;
+    const diffSec = Math.floor(diffMs / 1000);
+    const diffMin = Math.floor(diffSec / 60);
+
+    if (diffMin > 0) {
+      return `${diffMin} dakika ${diffSec % 60} saniye`;
+    }
+    return `${diffSec} saniye`;
+  }
+
+  /**
+   * Aktif görevlerin özetini al (AI'a context olarak verilecek)
+   */
+  getActiveTasksSummary(from) {
+    const tasks = taskManager.getTasksForOwner(from);
+    const running = tasks.filter(t => t.status === 'running');
+    const recent = tasks.filter(t => t.status === 'completed' &&
+      (Date.now() - new Date(t.completedAt).getTime()) < 5 * 60 * 1000); // Son 5 dakika
+
+    if (running.length === 0 && recent.length === 0) {
+      return null;
+    }
+
+    let summary = '\n\n[ARKA PLAN GÖREVLERİ]\n';
+
+    if (running.length > 0) {
+      summary += `Şu an çalışan ${running.length} görev var:\n`;
+      for (const task of running) {
+        const duration = this.getTaskDuration(task);
+        summary += `- "${task.description}" (${duration}dir çalışıyor)\n`;
+      }
+    }
+
+    if (recent.length > 0) {
+      summary += `Son tamamlanan görevler:\n`;
+      for (const task of recent) {
+        summary += `- "${task.description}" ✅\n`;
+      }
+    }
+
+    summary += '[/ARKA PLAN GÖREVLERİ]\n';
+    return summary;
   }
 
   async processOneMessage(message) {
     const from = message.from;
-    const body = message.body;
+    const body = message.body || '';
     const hasMedia = message.hasMedia === true;
 
-    try {
-      let session = this.sessionManager.getSession(from);
+    const lowerBody = body.toLowerCase().trim();
 
-      if (!session) {
-        try {
-          session = await this.sessionManager.createSession(from);
-          logger.info(`Yeni oturum oluşturuldu: ${from}`);
-        } catch (error) {
-          const txt = `Şu an çok yoğunum, biraz sonra tekrar yaz.\n(${error.message})`;
-          await this.replyToMessage(message, txt);
-          this.db.logMessage(from, txt, 'outgoing');
-          return;
-        }
+    // Görev listesi komutu
+    if (lowerBody === 'görevler' || lowerBody === 'gorevler' || lowerBody === 'tasks') {
+      return this.getTaskListMessage(from);
+    }
+
+    // Son kaydedilen dosya komutu
+    if (!hasMedia && lowerBody.replace(/\s+/g, ' ') === 'son dosya') {
+      const record = this.db?.getLastSavedFile?.(from) || this.lastSavedFileByChat.get(from) || null;
+      if (!record) {
+        return 'Henüz kaydedilen bir dosya yok.';
+      }
+      const mimetype = record.mimetype || 'bilinmiyor';
+      const size = this.formatBytesForUser(record.size_bytes ?? record.sizeBytes ?? 0);
+      const createdAt = record.created_at || record.createdAt || '-';
+      const messageId = record.message_id || record.messageId || '-';
+      const abs = record.absolute_path || record.absolutePath || '-';
+      return `Son dosya: ${abs} (${mimetype}, ${size})\nMesaj: ${messageId}\nTarih: ${createdAt}`;
+    }
+
+    // Normal akış - AI karar verecek
+    let session = this.sessionManager.getSession(from);
+    if (!session) {
+      session = await this.sessionManager.createSession(from);
+      logger.info(`Yeni oturum oluşturuldu: ${maskPhoneLike(from)}`);
+    }
+
+    let images = [];
+    let savedMediaInfo = null;
+
+    if (hasMedia) {
+      const media = await message.downloadMedia();
+      const mimetype = this.normalizeMimetype(media?.mimetype || '');
+      const data = media?.data || '';
+      if (!data) {
+        throw new Error('Dosya indirilemedi');
       }
 
-      let images = [];
-      let mediaFilePath = null;
+      const mediaType = this.mediaTypeFromMimetype(mimetype);
+      const maxBytes = this.getMaxMediaBytes(mediaType);
+      const estimatedSize = this.estimateBase64Bytes(data);
+      if (estimatedSize > maxBytes) {
+        throw new Error(
+          `Dosya çok büyük (${Math.ceil(estimatedSize / 1024 / 1024)}MB). En fazla ${Math.ceil(maxBytes / 1024 / 1024)}MB.`
+        );
+      }
 
-      if (hasMedia) {
-        const maxMediaMb = parseInt(process.env.MAX_MEDIA_MB || '8', 10);
-        const maxBytes = Math.max(1, maxMediaMb) * 1024 * 1024;
+      const buffer = Buffer.from(data, 'base64');
+      if (buffer.byteLength > maxBytes) {
+        throw new Error(
+          `Dosya çok büyük (${Math.ceil(buffer.byteLength / 1024 / 1024)}MB). En fazla ${Math.ceil(maxBytes / 1024 / 1024)}MB.`
+        );
+      }
 
-        try {
-          const media = await message.downloadMedia();
-          const mimetype = media?.mimetype || '';
-          const data = media?.data || '';
+      const chatDirName = this.sanitizePathPart(from);
+      const messageId = this.getMessageId(message);
+      const createdAtISO = this.getMessageCreatedAtISO(message);
+      const originalName = this.getMediaOriginalName(message);
+      const storedFilename = this.makeSafeStoredFilename({ originalName, mimetype });
 
-          if (!data) {
-            const txt = 'Dosyayı indiremedim, bir daha dener misin?';
-            await this.replyToMessage(message, txt);
-            this.db.logMessage(from, txt, 'outgoing');
-            return;
-          }
+      const preferredRoot = path.resolve(paths.mediaDir);
+      const fallbackRoot = path.resolve(paths.dataDir, 'media');
 
-          const buffer = Buffer.from(data, 'base64');
-          if (buffer.byteLength > maxBytes) {
-            const txt =
-              `Dosya çok büyük (${Math.ceil(buffer.byteLength / 1024 / 1024)}MB). ` +
-              `En fazla ${maxMediaMb}MB gönderebilir misin?`;
-            await this.replyToMessage(message, txt);
-            this.db.logMessage(from, txt, 'outgoing');
-            return;
-          }
-
-          const ext = this.mimeToExt(mimetype);
-          const dir = path.join(paths.dataDir, 'incoming-media', this.sanitizePathPart(from));
-          await fs.promises.mkdir(dir, { recursive: true });
-          mediaFilePath = path.join(
-            dir,
-            `${Date.now()}-${crypto.randomBytes(6).toString('hex')}.${ext}`
+      let baseDir = path.resolve(preferredRoot, chatDirName);
+      try {
+        await fs.promises.mkdir(baseDir, { recursive: true });
+      } catch (e) {
+        const code = e?.code || '';
+        if (code === 'EACCES' || code === 'EPERM') {
+          logger.warn(
+            `MEDIA_DIR yazılamıyor (${preferredRoot}). Fallback kullanılıyor: ${fallbackRoot}`
           );
-          await fs.promises.writeFile(mediaFilePath, buffer);
-          images = [mediaFilePath];
-        } catch (e) {
-          logger.error('Media indirme/kaydetme hatası:', e);
-          const txt = 'Fotoğrafı alamadım, bir daha yollar mısın?';
-          await this.replyToMessage(message, txt);
-          this.db.logMessage(from, txt, 'outgoing');
-          return;
-        }
-      }
-
-      const prompt =
-        hasMedia && (!body || body.trim() === '')
-          ? 'Kullanıcı bir görsel gönderdi (açıklama yok). Görseli analiz et ve kısa bir cevap ver; gerekiyorsa 1-2 net soru sor.'
-          : body;
-
-      let response;
-      try {
-        response = await session.execute(prompt, { images });
-      } finally {
-        if (mediaFilePath) {
-          try {
-            await fs.promises.unlink(mediaFilePath);
-          } catch {
-            // ignore
-          }
-        }
-      }
-
-      if (response) {
-        if (response.length > 4000) {
-          const chunks = this.splitMessage(response, 4000);
-          for (let i = 0; i < chunks.length; i++) {
-            await this.replyToMessage(message, chunks[i]);
-            this.db.logMessage(from, chunks[i], 'outgoing');
-            if (i < chunks.length - 1) {
-              await this.sleep(500);
-            }
-          }
+          baseDir = path.resolve(fallbackRoot, chatDirName);
+          await fs.promises.mkdir(baseDir, { recursive: true });
         } else {
-          await this.replyToMessage(message, response);
-          this.db.logMessage(from, response, 'outgoing');
+          throw e;
         }
       }
-    } catch (error) {
-      logger.error('Mesaj işleme hatası:', error);
-      try {
-        const txt = `Bir hata oluştu: ${error.message}\nTekrar dener misin?`;
-        await this.replyToMessage(message, txt);
-        this.db.logMessage(from, txt, 'outgoing');
-      } catch (sendError) {
-        logger.error('Hata mesajı gönderilemedi:', sendError.message);
+
+      const absolutePath = path.resolve(baseDir, storedFilename);
+      const basePrefix = baseDir.endsWith(path.sep) ? baseDir : baseDir + path.sep;
+      if (!absolutePath.startsWith(basePrefix)) {
+        throw new Error('Geçersiz dosya yolu');
       }
+
+      await fs.promises.writeFile(absolutePath, buffer);
+
+      savedMediaInfo = {
+        chatId: from,
+        messageId,
+        mediaType,
+        mimetype,
+        sizeBytes: buffer.byteLength,
+        originalName: originalName || storedFilename,
+        absolutePath,
+        createdAt: createdAtISO
+      };
+
+      this.lastSavedFileByChat.set(from, savedMediaInfo);
+      if (this.db?.setLastSavedFile) {
+        this.db.setLastSavedFile({
+          chatId: from,
+          messageId,
+          mimetype,
+          sizeBytes: buffer.byteLength,
+          absolutePath,
+          createdAt: createdAtISO
+        });
+      }
+
+      const ack = `Dosya kaydedildi: ${absolutePath} (${mimetype || 'bilinmiyor'}, ${this.formatBytesForUser(buffer.byteLength)})`;
+      try {
+        await this.replyToMessage(message, ack);
+        this.db.logMessage(from, ack, 'outgoing');
+      } catch (e) {
+        logger.warn('Dosya kaydedildi mesajı gönderilemedi:', e?.message || String(e));
+      }
+
+      if (mediaType === 'image') {
+        images = [absolutePath];
+      }
+    }
+
+    // Temel prompt
+    let basePrompt = body;
+    if (hasMedia) {
+      if (images.length && (!body || body.trim() === '')) {
+        basePrompt =
+          'Kullanıcı bir görsel gönderdi (açıklama yok). Görseli analiz et ve kısa bir cevap ver; gerekiyorsa 1-2 net soru sor.';
+      } else if (images.length) {
+        basePrompt = body;
+      } else if (savedMediaInfo) {
+        const sizeMb = Math.ceil(savedMediaInfo.sizeBytes / 1024 / 1024);
+        const metaLine =
+          `Kullanıcı bir dosya gönderdi (${savedMediaInfo.mediaType}). ` +
+          `Ad: "${savedMediaInfo.originalName}", Tür: ${savedMediaInfo.mimetype || 'bilinmiyor'}, Boyut: ~${sizeMb}MB.`;
+        basePrompt = (!body || body.trim() === '') ? metaLine : `${body}\n\n${metaLine}`;
+      } else if (!body || body.trim() === '') {
+        basePrompt = 'Kullanıcı bir dosya gönderdi (tür bilinmiyor). Kısa bir cevap ver ve gerekiyorsa 1-2 net soru sor.';
+      }
+    }
+
+    // Aktif görevlerin context'ini ekle
+    const taskSummary = this.getActiveTasksSummary(from);
+    const prompt = taskSummary ? basePrompt + taskSummary : basePrompt;
+
+    const response = await session.execute(prompt, { images });
+
+    // AI'ın arka plan görevi planı var mı kontrol et
+    const taskPlan = this.parseBackgroundTaskPlan(response);
+    if (taskPlan) {
+      const bgResult = await this.startBackgroundTask(message, taskPlan, images);
+      if (bgResult) {
+        return bgResult;
+      }
+      // Limit aşıldıysa normal yanıtı göster
+    }
+
+    // Normal yanıt - task plan marker'ını temizle
+    return this.cleanResponse(response);
+  }
+
+  /**
+   * AI yanıtından arka plan görev planını çıkar
+   * Format: ```bg-task\n{json}\n```
+   */
+  parseBackgroundTaskPlan(response) {
+    if (!response) return null;
+
+    // ```bg-task ... ``` bloğunu ara
+    const match = response.match(/```bg-task\s*\n([\s\S]*?)\n```/);
+    if (!match) return null;
+
+    try {
+      const json = JSON.parse(match[1].trim());
+
+      // Zorunlu alanlar
+      if (!json.title || !json.prompt) {
+        logger.warn('Geçersiz bg-task formatı: title veya prompt eksik');
+        return null;
+      }
+
+      return {
+        title: String(json.title),
+        steps: Array.isArray(json.steps) ? json.steps.map(String) : [],
+        prompt: String(json.prompt)
+      };
+    } catch (e) {
+      logger.warn('bg-task JSON parse hatası:', e.message);
+      return null;
+    }
+  }
+
+  /**
+   * Yanıttan bg-task bloğunu temizle
+   */
+  cleanResponse(response) {
+    if (!response) return response;
+    return response.replace(/```bg-task\s*\n[\s\S]*?\n```/g, '').trim();
+  }
+
+  async runQueue(chatId) {
+    const queue = this.getPendingQueue(chatId);
+
+    try {
+      while (queue.length) {
+        const job = queue.shift();
+        if (!job) continue;
+
+        try {
+          const result = await this.processOneMessage(job.message);
+          if (!result) {
+            const txt = 'Hata: Yanıt boş döndü.';
+            await this.replyToMessage(job.message, txt);
+            this.db.logMessage(chatId, txt, 'outgoing');
+            continue;
+          }
+
+          if (result.length > 4000) {
+            const chunks = this.splitMessage(result, 4000);
+            for (let i = 0; i < chunks.length; i++) {
+              await this.replyToMessage(job.message, chunks[i]);
+              this.db.logMessage(chatId, chunks[i], 'outgoing');
+              if (i < chunks.length - 1) {
+                await this.sleep(500);
+              }
+            }
+          } else {
+            await this.replyToMessage(job.message, result);
+            this.db.logMessage(chatId, result, 'outgoing');
+          }
+        } catch (e) {
+          const errorMsg = e?.message || String(e);
+          const txt = `Hata: ${errorMsg}`;
+          await this.replyToMessage(job.message, txt);
+          this.db.logMessage(chatId, txt, 'outgoing');
+        }
+      }
+    } finally {
+      this.processingQueue.set(chatId, false);
     }
   }
 
@@ -252,10 +647,8 @@ class MessageHandler {
     if (message.fromMe) return;
     if (!hasMedia && (!body || body.trim() === '')) return;
 
-    // Grup mesajlarını direkt yoksay
     if (from.includes('@g.us')) return;
 
-    // Kontak bilgisi (LID durumlarında numarayı buradan almak daha güvenli)
     let contactNumber = null;
     try {
       const contact = await message.getContact();
@@ -264,16 +657,8 @@ class MessageHandler {
       // ignore
     }
 
-    // Whitelist kontrolü
     if (!this.isAllowed(from, contactNumber)) {
       logger.warn(`Yetkisiz mesaj: ${from}`);
-      return;
-    }
-
-    // Rate limit kontrolü
-    if (!this.checkRateLimit(from)) {
-      await this.replyToMessage(message, 'Yavaş ol biraz, çok hızlı mesaj atıyorsun.');
-      this.db.logMessage(from, 'Yavaş ol biraz, çok hızlı mesaj atıyorsun.', 'outgoing');
       return;
     }
 
@@ -286,36 +671,19 @@ class MessageHandler {
       : body;
     this.db.logMessage(from, incomingLog, 'incoming');
 
-    if (this.processingQueue.get(from)) {
-      const queue = this.getPendingQueue(from);
-      const maxQueue = parseInt(process.env.MAX_QUEUE_PER_CHAT || '10', 10);
-      if (queue.length >= maxQueue) {
-        const txt = `Şu an çok yoğunum. Bekleyen mesaj sayın ${queue.length}. Biraz bekleyip tekrar yazar mısın?`;
-        await this.replyToMessage(message, txt);
-        this.db.logMessage(from, txt, 'outgoing');
-        return;
-      }
+    const queue = this.getPendingQueue(from);
+    const job = this.createJob(message);
+    queue.push(job);
 
-      queue.push(message);
-      const txt = `Şu an işteyim; mesajını sıraya aldım. (Bekleyen: ${queue.length})`;
-      await this.replyToMessage(message, txt);
-      this.db.logMessage(from, txt, 'outgoing');
+    if (this.processingQueue.get(from)) {
       return;
     }
 
     this.processingQueue.set(from, true);
-    try {
-      await this.processOneMessage(message);
-
-      const queue = this.getPendingQueue(from);
-      while (queue.length) {
-        const next = queue.shift();
-        await this.processOneMessage(next);
-      }
-    } finally {
-      this.pendingMessages.delete(from);
+    this.runQueue(from).catch((error) => {
+      logger.error('Kuyruk çalıştırma hatası:', error);
       this.processingQueue.set(from, false);
-    }
+    });
   }
 
   async replyToMessage(originalMessage, text) {
