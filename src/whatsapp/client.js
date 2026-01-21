@@ -29,6 +29,7 @@ class WhatsAppClient extends EventEmitter {
       }),
       puppeteer: {
         headless: true,
+        protocolTimeout: parseInt(process.env.PUPPETEER_PROTOCOL_TIMEOUT_MS || '600000', 10),
         args: [
           '--no-sandbox',
           '--disable-setuid-sandbox',

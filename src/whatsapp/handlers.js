@@ -7,8 +7,15 @@ import logger from '../logger.js';
 import { paths } from '../paths.js';
 import { taskManager } from '../background/task-manager.js';
 import { maskPhoneLike } from '../utils/redact.js';
+import {
+  buildMediaDownloadUrl,
+  downloadAndDecryptToFile,
+  normalizeMediaKey,
+  resolveMediaKeyType
+} from './media-download.js';
 
 const configPath = process.env.SESSIONS_CONFIG_PATH || path.join(paths.configDir, 'sessions.json');
+const NO_RESPONSE = Symbol('no-response');
 
 class MessageHandler {
   constructor(whatsappClient, sessionManager, intentDetector, db) {
@@ -20,6 +27,7 @@ class MessageHandler {
     this.processingQueue = new Map(); // chatId -> boolean
     this.pendingJobs = new Map(); // chatId -> Job[]
     this.lastSavedFileByChat = new Map(); // chatId -> last file info
+    this.systemNotesByChat = new Map(); // chatId -> string[]
   }
 
   loadConfig() {
@@ -152,6 +160,20 @@ class MessageHandler {
     return null;
   }
 
+  cleanMediaBody(body, originalName) {
+    const trimmed = String(body || '').trim();
+    if (!trimmed) return '';
+    const original = String(originalName || '').trim();
+    if (!original) return trimmed;
+
+    const normalize = (value) => value.replace(/\s+/g, ' ').trim().toLowerCase();
+    if (normalize(trimmed) === normalize(original)) {
+      return '';
+    }
+
+    return trimmed;
+  }
+
   makeSafeStoredFilename({ originalName, mimetype }) {
     const extFromName = originalName ? path.extname(originalName).replace(/^\./, '') : '';
     const safeExtFromName = extFromName && /^[a-zA-Z0-9]{1,8}$/.test(extFromName) ? extFromName : '';
@@ -189,6 +211,176 @@ class MessageHandler {
       if (Number.isFinite(num) && num > 0) return num;
     }
     return 0;
+  }
+
+  addSystemNote(chatId, text) {
+    const note = String(text || '').trim();
+    if (!note) return;
+
+    const queue = this.systemNotesByChat.get(chatId) || [];
+    queue.push(note);
+    if (queue.length > 10) {
+      queue.splice(0, queue.length - 10);
+    }
+    this.systemNotesByChat.set(chatId, queue);
+  }
+
+  consumeSystemNotes(chatId) {
+    const queue = this.systemNotesByChat.get(chatId);
+    if (!queue || queue.length === 0) return [];
+    this.systemNotesByChat.delete(chatId);
+    return queue;
+  }
+
+  formatSystemNotes(notes) {
+    if (!notes || notes.length === 0) return '';
+    const lines = notes.map((note) => `- ${note}`);
+    return `\n\n[SISTEM MESAJLARI]\n${lines.join('\n')}\n[/SISTEM MESAJLARI]\n`;
+  }
+
+  getDirectDownloadThresholdBytes() {
+    const raw = process.env.DIRECT_MEDIA_MB || process.env.DIRECT_MEDIA_DOWNLOAD_MB || '16';
+    const mb = parseInt(raw, 10);
+    if (Number.isFinite(mb) && mb > 0) {
+      return mb * 1024 * 1024;
+    }
+    return 16 * 1024 * 1024;
+  }
+
+  shouldUseDirectDownload(preDownloadSize) {
+    const force = String(process.env.DIRECT_MEDIA_FORCE || '')
+      .toLowerCase()
+      .trim();
+    if (force === '1' || force === 'true' || force === 'yes') {
+      return true;
+    }
+    if (!preDownloadSize || preDownloadSize <= 0) return false;
+    return preDownloadSize >= this.getDirectDownloadThresholdBytes();
+  }
+
+  getDirectMediaInfo(message) {
+    const data = message?._data || {};
+    const mediaData = data.mediaData || {};
+    return {
+      directPath: data.directPath || mediaData.directPath || null,
+      url: data.url || mediaData.url || data.clientUrl || mediaData.clientUrl || null,
+      mediaKey: data.mediaKey || mediaData.mediaKey || message?.mediaKey || null,
+      type: data.type || message?.type || null,
+      mimetype: data.mimetype || mediaData.mimetype || null
+    };
+  }
+
+  async resolveMediaSavePath(chatId, storedFilename) {
+    const chatDirName = this.sanitizePathPart(chatId);
+    const preferredRoot = path.resolve(paths.mediaDir);
+    const fallbackRoot = path.resolve(paths.dataDir, 'media');
+
+    let baseDir = path.resolve(preferredRoot, chatDirName);
+    try {
+      await fs.promises.mkdir(baseDir, { recursive: true });
+    } catch (e) {
+      const code = e?.code || '';
+      if (code === 'EACCES' || code === 'EPERM') {
+        logger.warn(`MEDIA_DIR yazılamıyor (${preferredRoot}). Fallback: ${fallbackRoot}`);
+        baseDir = path.resolve(fallbackRoot, chatDirName);
+        await fs.promises.mkdir(baseDir, { recursive: true });
+      } else {
+        throw e;
+      }
+    }
+
+    const absolutePath = path.resolve(baseDir, storedFilename);
+    const basePrefix = baseDir.endsWith(path.sep) ? baseDir : baseDir + path.sep;
+    if (!absolutePath.startsWith(basePrefix)) {
+      throw new Error('Geçersiz dosya yolu');
+    }
+
+    return { baseDir, absolutePath };
+  }
+
+  async downloadMediaDirect(message, preDownloadSize, maxBytes) {
+    const info = this.getDirectMediaInfo(message);
+    const url = buildMediaDownloadUrl({ directPath: info.directPath, url: info.url });
+    const mediaKey = normalizeMediaKey(info.mediaKey);
+
+    if (!url || !mediaKey) {
+      throw new Error('Direct indirme için medya bilgileri eksik');
+    }
+
+    const mimetype = this.normalizeMimetype(info.mimetype || '');
+    const mediaType = this.mediaTypeFromMimetype(mimetype);
+    const keyType = resolveMediaKeyType(info.type, mimetype);
+
+    if (!keyType) {
+      throw new Error('Medya tipi çözülemedi');
+    }
+
+    if (preDownloadSize > 0 && preDownloadSize > maxBytes) {
+      throw new Error(
+        `Dosya çok büyük (${Math.ceil(preDownloadSize / 1024 / 1024)}MB). En fazla ${Math.ceil(maxBytes / 1024 / 1024)}MB.`
+      );
+    }
+
+    const from = message.from;
+    const messageId = this.getMessageId(message);
+    const createdAtISO = this.getMessageCreatedAtISO(message);
+    const originalName = this.getMediaOriginalName(message);
+    const storedFilename = this.makeSafeStoredFilename({ originalName, mimetype });
+    const { absolutePath } = await this.resolveMediaSavePath(from, storedFilename);
+
+    logger.info(
+      `Direct medya indiriliyor: ${originalName || storedFilename}, ` +
+      `tahmini boyut: ${preDownloadSize > 0 ? this.formatBytesForUser(preDownloadSize) : 'bilinmiyor'}`
+    );
+
+    const start = Date.now();
+    const { sizeBytes } = await downloadAndDecryptToFile({
+      url,
+      mediaKey,
+      keyType,
+      outputPath: absolutePath
+    });
+    const elapsedMs = Date.now() - start;
+
+    logger.info(
+      `Direct indirme tamamlandı (${elapsedMs}ms), boyut: ${this.formatBytesForUser(sizeBytes)}`
+    );
+
+    return {
+      chatId: from,
+      mediaType,
+      mimetype,
+      sizeBytes,
+      originalName: originalName || storedFilename,
+      absolutePath,
+      messageId,
+      createdAt: createdAtISO
+    };
+  }
+
+  async finalizeSavedMedia(message, savedMediaInfo) {
+    const chatId = savedMediaInfo.chatId;
+    this.lastSavedFileByChat.set(chatId, savedMediaInfo);
+    if (this.db?.setLastSavedFile) {
+      this.db.setLastSavedFile({
+        chatId,
+        messageId: savedMediaInfo.messageId,
+        mimetype: savedMediaInfo.mimetype,
+        sizeBytes: savedMediaInfo.sizeBytes,
+        absolutePath: savedMediaInfo.absolutePath,
+        createdAt: savedMediaInfo.createdAt
+      });
+    }
+
+    const ack = `Dosya kaydedildi: ${savedMediaInfo.absolutePath} ` +
+      `(${savedMediaInfo.mimetype || 'bilinmiyor'}, ${this.formatBytesForUser(savedMediaInfo.sizeBytes)})`;
+    this.addSystemNote(chatId, ack);
+    try {
+      await this.replyToMessage(message, ack);
+      this.db.logMessage(chatId, ack, 'outgoing');
+    } catch (e) {
+      logger.warn('Dosya kaydedildi mesajı gönderilemedi:', e?.message || String(e));
+    }
   }
 
   /**
@@ -378,6 +570,7 @@ class MessageHandler {
 
           await this.replyToMessage(message, resultText);
           this.db.logMessage(from, resultText, 'outgoing');
+          this.addSystemNote(from, resultText);
         } catch (e) {
           logger.error('Görev sonucu gönderme hatası:', e);
         }
@@ -480,7 +673,7 @@ class MessageHandler {
 
   async processOneMessage(message) {
     const from = message.from;
-    const body = message.body || '';
+    let body = message.body || '';
     const hasMedia = message.hasMedia === true;
 
     const lowerBody = body.toLowerCase().trim();
@@ -517,9 +710,13 @@ class MessageHandler {
     if (hasMedia) {
       // 1. Önce dosya boyutunu İNDİRMEDEN kontrol et (OOM koruması)
       const preDownloadSize = this.getPreDownloadFileSize(message);
+      const originalNameHint = this.getMediaOriginalName(message);
+      body = this.cleanMediaBody(body, originalNameHint);
       const mimetypeHint = message?._data?.mimetype || '';
       const mediaTypeHint = this.mediaTypeFromMimetype(mimetypeHint);
       const maxBytes = this.getMaxMediaBytes(mediaTypeHint);
+
+      logger.info(`Dosya alınıyor: ${this.getMediaOriginalName(message) || 'bilinmeyen'}, tahmini boyut: ${preDownloadSize > 0 ? this.formatBytesForUser(preDownloadSize) : 'bilinmiyor'}, limit: ${this.formatBytesForUser(maxBytes)}`);
 
       if (preDownloadSize > 0 && preDownloadSize > maxBytes) {
         throw new Error(
@@ -527,92 +724,79 @@ class MessageHandler {
         );
       }
 
-      // 2. Şimdi indir
-      const media = await message.downloadMedia();
-      const mimetype = this.normalizeMimetype(media?.mimetype || '');
-      const data = media?.data || '';
-      if (!data) {
-        throw new Error('Dosya indirilemedi');
-      }
-
-      const mediaType = this.mediaTypeFromMimetype(mimetype);
-      const actualMaxBytes = this.getMaxMediaBytes(mediaType);
-      const estimatedSize = this.estimateBase64Bytes(data);
-
-      // 3. İndirme sonrası boyut kontrolü (metadata eksik olabilir)
-      if (estimatedSize > actualMaxBytes) {
-        throw new Error(
-          `Dosya çok büyük (${Math.ceil(estimatedSize / 1024 / 1024)}MB). En fazla ${Math.ceil(actualMaxBytes / 1024 / 1024)}MB.`
-        );
-      }
-
-      const chatDirName = this.sanitizePathPart(from);
-      const messageId = this.getMessageId(message);
-      const createdAtISO = this.getMessageCreatedAtISO(message);
-      const originalName = this.getMediaOriginalName(message);
-      const storedFilename = this.makeSafeStoredFilename({ originalName, mimetype });
-
-      const preferredRoot = path.resolve(paths.mediaDir);
-      const fallbackRoot = path.resolve(paths.dataDir, 'media');
-
-      let baseDir = path.resolve(preferredRoot, chatDirName);
-      try {
-        await fs.promises.mkdir(baseDir, { recursive: true });
-      } catch (e) {
-        const code = e?.code || '';
-        if (code === 'EACCES' || code === 'EPERM') {
+      // 2. Büyük dosyalarda direct indirme yolunu dene
+      if (this.shouldUseDirectDownload(preDownloadSize)) {
+        try {
+          savedMediaInfo = await this.downloadMediaDirect(message, preDownloadSize, maxBytes);
+        } catch (directErr) {
           logger.warn(
-            `MEDIA_DIR yazılamıyor (${preferredRoot}). Fallback kullanılıyor: ${fallbackRoot}`
+            `Direct indirme başarısız, normal indirme deneniyor: ${directErr?.message || String(directErr)}`
           );
-          baseDir = path.resolve(fallbackRoot, chatDirName);
-          await fs.promises.mkdir(baseDir, { recursive: true });
-        } else {
-          throw e;
         }
       }
 
-      const absolutePath = path.resolve(baseDir, storedFilename);
-      const basePrefix = baseDir.endsWith(path.sep) ? baseDir : baseDir + path.sep;
-      if (!absolutePath.startsWith(basePrefix)) {
-        throw new Error('Geçersiz dosya yolu');
-      }
+      // 3. Fallback: whatsapp-web.js downloadMedia (base64)
+      if (!savedMediaInfo) {
+        logger.info('Dosya indiriliyor...');
+        const downloadStart = Date.now();
+        let media;
+        try {
+          media = await message.downloadMedia();
+          logger.info(
+            `Dosya indirildi (${Date.now() - downloadStart}ms), boyut: ` +
+            `${media?.data?.length ? this.formatBytesForUser(this.estimateBase64Bytes(media.data)) : 'null'}`
+          );
+        } catch (downloadErr) {
+          logger.error(`Dosya indirme hatası (${Date.now() - downloadStart}ms): ${downloadErr?.message || String(downloadErr)}`);
+          throw new Error(`Dosya indirilemedi: ${downloadErr?.message || 'Bilinmeyen hata'}`);
+        }
+        const mimetype = this.normalizeMimetype(media?.mimetype || '');
+        const data = media?.data || '';
+        if (!data) {
+          throw new Error('Dosya indirilemedi');
+        }
 
-      // 4. Streaming ile kaydet (büyük dosyalarda bellek koruması)
-      const actualSize = await this.saveMediaStreaming(media, absolutePath, estimatedSize);
+        const mediaType = this.mediaTypeFromMimetype(mimetype);
+        const actualMaxBytes = this.getMaxMediaBytes(mediaType);
+        const estimatedSize = this.estimateBase64Bytes(data);
 
-      savedMediaInfo = {
-        chatId: from,
-        messageId,
-        mediaType,
-        mimetype,
-        sizeBytes: actualSize,
-        originalName: originalName || storedFilename,
-        absolutePath,
-        createdAt: createdAtISO
-      };
+        // İndirme sonrası boyut kontrolü (metadata eksik olabilir)
+        if (estimatedSize > actualMaxBytes) {
+          throw new Error(
+            `Dosya çok büyük (${Math.ceil(estimatedSize / 1024 / 1024)}MB). En fazla ${Math.ceil(actualMaxBytes / 1024 / 1024)}MB.`
+          );
+        }
 
-      this.lastSavedFileByChat.set(from, savedMediaInfo);
-      if (this.db?.setLastSavedFile) {
-        this.db.setLastSavedFile({
+        const messageId = this.getMessageId(message);
+        const createdAtISO = this.getMessageCreatedAtISO(message);
+        const originalName = this.getMediaOriginalName(message);
+        const storedFilename = this.makeSafeStoredFilename({ originalName, mimetype });
+        const { absolutePath } = await this.resolveMediaSavePath(from, storedFilename);
+
+        // Streaming ile kaydet (büyük dosyalarda bellek koruması)
+        const actualSize = await this.saveMediaStreaming(media, absolutePath, estimatedSize);
+
+        savedMediaInfo = {
           chatId: from,
           messageId,
+          mediaType,
           mimetype,
           sizeBytes: actualSize,
+          originalName: originalName || storedFilename,
           absolutePath,
           createdAt: createdAtISO
-        });
+        };
       }
 
-      const ack = `Dosya kaydedildi: ${absolutePath} (${mimetype || 'bilinmiyor'}, ${this.formatBytesForUser(actualSize)})`;
-      try {
-        await this.replyToMessage(message, ack);
-        this.db.logMessage(from, ack, 'outgoing');
-      } catch (e) {
-        logger.warn('Dosya kaydedildi mesajı gönderilemedi:', e?.message || String(e));
+      if (savedMediaInfo) {
+        await this.finalizeSavedMedia(message, savedMediaInfo);
+        if (savedMediaInfo.mediaType === 'image') {
+          images = [savedMediaInfo.absolutePath];
+        }
       }
 
-      if (mediaType === 'image') {
-        images = [absolutePath];
+      if (!body || body.trim() === '') {
+        return NO_RESPONSE;
       }
     }
 
@@ -635,9 +819,11 @@ class MessageHandler {
       }
     }
 
-    // Aktif görevlerin context'ini ekle
+    // Sistem mesajlarını ve görev özetini ekle
+    const systemNotes = this.consumeSystemNotes(from);
+    const systemBlock = this.formatSystemNotes(systemNotes);
     const taskSummary = this.getActiveTasksSummary(from);
-    const prompt = taskSummary ? basePrompt + taskSummary : basePrompt;
+    const prompt = `${basePrompt}${systemBlock}${taskSummary || ''}`;
 
     const response = await session.execute(prompt, { images });
 
@@ -704,11 +890,15 @@ class MessageHandler {
 
         try {
           const result = await this.processOneMessage(job.message);
+          if (result === NO_RESPONSE) {
+            continue;
+          }
           if (!result) {
             const txt = 'Hata: Yanıt boş döndü.';
             try {
               await this.replyToMessage(job.message, txt);
               this.db.logMessage(chatId, txt, 'outgoing');
+              this.addSystemNote(chatId, txt);
             } catch (sendError) {
               logger.error('Hata mesajı gönderilemedi:', sendError?.message || String(sendError));
             }
@@ -740,13 +930,14 @@ class MessageHandler {
         } catch (e) {
           const errorMsg = e?.message || String(e);
           const txt = `Hata: ${errorMsg}`;
-          try {
-            await this.replyToMessage(job.message, txt);
-            this.db.logMessage(chatId, txt, 'outgoing');
-          } catch (sendError) {
-            logger.error('Hata mesajı gönderilemedi:', sendError?.message || String(sendError));
+            try {
+              await this.replyToMessage(job.message, txt);
+              this.db.logMessage(chatId, txt, 'outgoing');
+              this.addSystemNote(chatId, txt);
+            } catch (sendError) {
+              logger.error('Hata mesajı gönderilemedi:', sendError?.message || String(sendError));
+            }
           }
-        }
       }
     } finally {
       this.processingQueue.set(chatId, false);
