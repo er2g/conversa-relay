@@ -196,7 +196,7 @@ class MessageHandler {
    * Küçük dosyalar için normal Buffer kullan
    */
   async saveMediaStreaming(media, absolutePath, estimatedSize) {
-    const STREAM_THRESHOLD = 10 * 1024 * 1024; // 10MB üstü streaming
+    const STREAM_THRESHOLD = 5 * 1024 * 1024; // 5MB üstü streaming (bellek optimizasyonu)
     const data = media?.data || '';
 
     if (!data) {
