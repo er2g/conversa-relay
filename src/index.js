@@ -32,7 +32,7 @@ class WhatsAppCodexApp {
 
   async start() {
     logger.info('='.repeat(50));
-    logger.info('WhatsApp Codex Sistemi Başlatılıyor...');
+    logger.info('WhatsApp AI Bridge Sistemi Başlatılıyor...');
     logger.info('='.repeat(50));
 
     try {

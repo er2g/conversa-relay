@@ -795,9 +795,11 @@ class MessageHandler {
         }
       }
 
-      if (!body || body.trim() === '') {
-        return NO_RESPONSE;
+      const trimmedBody = String(body || '').trim();
+      if (trimmedBody) {
+        this.addSystemNote(from, `Medya notu: ${trimmedBody}`);
       }
+      return NO_RESPONSE;
     }
 
     // Temel prompt

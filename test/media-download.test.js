@@ -11,7 +11,7 @@ let baseUrl;
 let authHeader;
 
 before(async () => {
-  tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'whatsapp-claude-test-'));
+  tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'whatsapp-ai-bridge-test-'));
   process.env.DATA_DIR = tmpDir;
   process.env.MEDIA_DIR = path.join(tmpDir, 'media');
   process.env.DB_PATH = path.join(tmpDir, 'database.sqlite');

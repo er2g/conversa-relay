@@ -1,6 +1,7 @@
-# whatsapp-claude
+# WhatsApp AI Bridge
 
-WhatsApp Web üstünden mesajları alıp Codex’e ileten ve basit bir dashboard/API sunan Node.js uygulaması.
+WhatsApp Web üstünden mesajları alıp Codex/Claude orkestratörlerine ileten,
+arka plan görevleri ve basit bir dashboard/API sunan Node.js uygulaması.
 
 ## Kurulum
 
@@ -26,6 +27,7 @@ cp config/sessions.example.json config/sessions.json
 - `SESSIONS_CONFIG_PATH` (varsayılan `./config/sessions.json`)
 - `DASHBOARD_USER` / `DASHBOARD_PASS` (dashboard basic auth)
 - `CHROMIUM_PATH` (varsayılan `/usr/bin/chromium`)
+- `ORCHESTRATOR_TYPE` (`claude` veya `codex`)
 - `MAX_MEDIA_MB` (genel medya limiti, varsayılan `8`)
 - `MAX_IMAGE_MEDIA_MB`, `MAX_DOC_MEDIA_MB`, `MAX_AUDIO_MEDIA_MB`, `MAX_VIDEO_MEDIA_MB`
 
@@ -39,7 +41,7 @@ npm run start
 
 ## Fotoğraf desteği
 
-WhatsApp’tan gönderilen fotoğraflar (caption’lı veya captionsız) Codex’e görsel olarak aktarılır.
+WhatsApp’tan gönderilen fotoğraflar (caption’lı veya captionsız) orkestratöre görsel olarak aktarılır.
 
 ## Medya indirimi (buyuk dosyalar)
 
@@ -56,7 +58,8 @@ Istege bagli ayarlar:
 
 ## Sistem mesajlari ve AI tetikleme
 
-- Medya tek basina geldiyse AI tetiklenmez; sistem notu olarak kaydedilir.
+- Medya mesajlari AI'yi tetiklemez; dosya bilgisi sistem notu olarak kaydedilir.
+- Medya caption'i varsa "Medya notu" olarak saklanir.
 - Kullanici bir sonraki mesaj attiginda son sistem notlari prompta eklenir.
 
 ## Güvenlik notu

@@ -1,7 +1,7 @@
 {
-  "name": "whatsapp-claude",
+  "name": "whatsapp-ai-bridge",
   "version": "1.0.0",
-  "description": "WhatsApp - Codex Integration System",
+  "description": "WhatsApp AI Bridge (Codex/Claude) with dashboard and background tasks",
   "main": "src/index.js",
   "type": "module",
   "scripts": {
