@@ -1,6 +1,8 @@
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
+import { pipeline } from 'stream/promises';
+import { Readable } from 'stream';
 import logger from '../logger.js';
 import { paths } from '../paths.js';
 import { taskManager } from '../background/task-manager.js';
@@ -168,6 +170,92 @@ class MessageHandler {
     if (n < 1024) return `${n} B`;
     if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
     return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  }
+
+  /**
+   * Dosya boyutunu indirmeden önce kontrol et
+   * WhatsApp message metadata'sından boyut bilgisini al
+   */
+  getPreDownloadFileSize(message) {
+    const candidates = [
+      message?._data?.size,
+      message?._data?.fileSize,
+      message?._data?.mediaData?.size,
+      message?.fileSize,
+      message?.size
+    ];
+    for (const c of candidates) {
+      const num = Number(c);
+      if (Number.isFinite(num) && num > 0) return num;
+    }
+    return 0;
+  }
+
+  /**
+   * Büyük dosyaları streaming ile diske kaydet (belleği korur)
+   * Küçük dosyalar için normal Buffer kullan
+   */
+  async saveMediaStreaming(media, absolutePath, estimatedSize) {
+    const STREAM_THRESHOLD = 10 * 1024 * 1024; // 10MB üstü streaming
+    const data = media?.data || '';
+
+    if (!data) {
+      throw new Error('Dosya verisi boş');
+    }
+
+    if (estimatedSize > STREAM_THRESHOLD) {
+      // Streaming: Base64'ü chunk'lar halinde decode et
+      logger.info(`Büyük dosya streaming ile kaydediliyor: ${this.formatBytesForUser(estimatedSize)}`);
+
+      const CHUNK_SIZE = 1024 * 1024; // 1MB chunks
+      const writeStream = fs.createWriteStream(absolutePath);
+
+      try {
+        let offset = 0;
+        while (offset < data.length) {
+          const chunk = data.slice(offset, offset + CHUNK_SIZE);
+          const buffer = Buffer.from(chunk, 'base64');
+
+          await new Promise((resolve, reject) => {
+            const canContinue = writeStream.write(buffer, (err) => {
+              if (err) reject(err);
+            });
+            if (canContinue) {
+              resolve();
+            } else {
+              writeStream.once('drain', resolve);
+            }
+          });
+
+          offset += CHUNK_SIZE;
+
+          // Bellek baskısını azalt
+          if (global.gc && offset % (10 * CHUNK_SIZE) === 0) {
+            global.gc();
+          }
+        }
+
+        await new Promise((resolve, reject) => {
+          writeStream.end((err) => {
+            if (err) reject(err);
+            else resolve();
+          });
+        });
+
+        const stats = await fs.promises.stat(absolutePath);
+        return stats.size;
+      } catch (e) {
+        writeStream.destroy();
+        // Hatalı dosyayı temizle
+        try { await fs.promises.unlink(absolutePath); } catch {}
+        throw e;
+      }
+    } else {
+      // Küçük dosya: Normal Buffer kullan
+      const buffer = Buffer.from(data, 'base64');
+      await fs.promises.writeFile(absolutePath, buffer);
+      return buffer.byteLength;
+    }
   }
 
   isAllowed(chatId, contactNumber) {
@@ -427,6 +515,19 @@ class MessageHandler {
     let savedMediaInfo = null;
 
     if (hasMedia) {
+      // 1. Önce dosya boyutunu İNDİRMEDEN kontrol et (OOM koruması)
+      const preDownloadSize = this.getPreDownloadFileSize(message);
+      const mimetypeHint = message?._data?.mimetype || '';
+      const mediaTypeHint = this.mediaTypeFromMimetype(mimetypeHint);
+      const maxBytes = this.getMaxMediaBytes(mediaTypeHint);
+
+      if (preDownloadSize > 0 && preDownloadSize > maxBytes) {
+        throw new Error(
+          `Dosya çok büyük (${Math.ceil(preDownloadSize / 1024 / 1024)}MB). En fazla ${Math.ceil(maxBytes / 1024 / 1024)}MB. Dosya indirilmedi.`
+        );
+      }
+
+      // 2. Şimdi indir
       const media = await message.downloadMedia();
       const mimetype = this.normalizeMimetype(media?.mimetype || '');
       const data = media?.data || '';
@@ -435,18 +536,13 @@ class MessageHandler {
       }
 
       const mediaType = this.mediaTypeFromMimetype(mimetype);
-      const maxBytes = this.getMaxMediaBytes(mediaType);
+      const actualMaxBytes = this.getMaxMediaBytes(mediaType);
       const estimatedSize = this.estimateBase64Bytes(data);
-      if (estimatedSize > maxBytes) {
-        throw new Error(
-          `Dosya çok büyük (${Math.ceil(estimatedSize / 1024 / 1024)}MB). En fazla ${Math.ceil(maxBytes / 1024 / 1024)}MB.`
-        );
-      }
 
-      const buffer = Buffer.from(data, 'base64');
-      if (buffer.byteLength > maxBytes) {
+      // 3. İndirme sonrası boyut kontrolü (metadata eksik olabilir)
+      if (estimatedSize > actualMaxBytes) {
         throw new Error(
-          `Dosya çok büyük (${Math.ceil(buffer.byteLength / 1024 / 1024)}MB). En fazla ${Math.ceil(maxBytes / 1024 / 1024)}MB.`
+          `Dosya çok büyük (${Math.ceil(estimatedSize / 1024 / 1024)}MB). En fazla ${Math.ceil(actualMaxBytes / 1024 / 1024)}MB.`
         );
       }
 
@@ -481,14 +577,15 @@ class MessageHandler {
         throw new Error('Geçersiz dosya yolu');
       }
 
-      await fs.promises.writeFile(absolutePath, buffer);
+      // 4. Streaming ile kaydet (büyük dosyalarda bellek koruması)
+      const actualSize = await this.saveMediaStreaming(media, absolutePath, estimatedSize);
 
       savedMediaInfo = {
         chatId: from,
         messageId,
         mediaType,
         mimetype,
-        sizeBytes: buffer.byteLength,
+        sizeBytes: actualSize,
         originalName: originalName || storedFilename,
         absolutePath,
         createdAt: createdAtISO
@@ -500,13 +597,13 @@ class MessageHandler {
           chatId: from,
           messageId,
           mimetype,
-          sizeBytes: buffer.byteLength,
+          sizeBytes: actualSize,
           absolutePath,
           createdAt: createdAtISO
         });
       }
 
-      const ack = `Dosya kaydedildi: ${absolutePath} (${mimetype || 'bilinmiyor'}, ${this.formatBytesForUser(buffer.byteLength)})`;
+      const ack = `Dosya kaydedildi: ${absolutePath} (${mimetype || 'bilinmiyor'}, ${this.formatBytesForUser(actualSize)})`;
       try {
         await this.replyToMessage(message, ack);
         this.db.logMessage(from, ack, 'outgoing');
@@ -703,54 +800,113 @@ class MessageHandler {
     });
   }
 
-  async replyToMessage(originalMessage, text) {
+  /**
+   * Mesaj gönderme - retry mekanizması ile
+   * Frame detached hatalarında yeniden dener
+   */
+  async replyToMessage(originalMessage, text, maxRetries = 3) {
     const chatId = originalMessage.from;
+    let lastError = null;
 
-    // Prefer whatsapp-web.js API (more stable than puppeteer page.evaluate).
-    try {
-      if (this.wa?.client?.sendMessage) {
-        await this.wa.client.sendMessage(chatId, text);
-        logger.info(`Mesaj gönderildi -> ${maskPhoneLike(chatId)}`);
-        return;
-      }
-    } catch (e) {
-      logger.warn('sendMessage başarısız, fallback deneniyor:', e?.message || String(e));
-    }
-
-    // Fallback: puppeteer page injection (older path).
-    const page = this.wa?.client?.pupPage;
-    if (!page) {
-      throw new Error('WhatsApp sayfası hazır değil');
-    }
-
-    const result = await page.evaluate(
-      async (chatId, text) => {
-        try {
-          const WWebJS = window.WWebJS;
-          if (!WWebJS?.getChat || !WWebJS?.sendMessage) {
-            return { success: false, error: 'WWebJS hazır değil' };
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        // 1. Önce whatsapp-web.js API'yi dene (en stabil)
+        const client = this.wa?.client;
+        if (client && typeof client.sendMessage === 'function') {
+          try {
+            await client.sendMessage(chatId, text);
+            logger.info(`Mesaj gönderildi -> ${maskPhoneLike(chatId)}`);
+            return;
+          } catch (sendErr) {
+            const errMsg = sendErr?.message || String(sendErr) || 'Bilinmeyen sendMessage hatası';
+            logger.warn(`sendMessage hatası (deneme ${attempt}): ${errMsg}`);
+            // sendMessage başarısız, fallback'e devam et
           }
-
-          const chat = await WWebJS.getChat(chatId, { getAsModel: false });
-          if (!chat) {
-            return { success: false, error: 'Chat bulunamadı' };
-          }
-
-          await WWebJS.sendMessage(chat, text, {});
-          return { success: true };
-        } catch (e) {
-          return { success: false, error: e?.message || String(e) };
         }
-      },
-      chatId,
-      text
-    );
 
-    if (!result?.success) {
-      throw new Error(result?.error || 'Mesaj gönderilemedi');
+        // 2. Fallback: puppeteer page injection
+        const page = client?.pupPage;
+        if (!page) {
+          throw new Error('WhatsApp sayfası hazır değil');
+        }
+
+        const result = await page.evaluate(
+          async (chatId, text) => {
+            try {
+              const WWebJS = window.WWebJS;
+              if (!WWebJS?.getChat || !WWebJS?.sendMessage) {
+                return { success: false, error: 'WWebJS hazır değil', retryable: true };
+              }
+
+              const chat = await WWebJS.getChat(chatId, { getAsModel: false });
+              if (!chat) {
+                return { success: false, error: 'Chat bulunamadı', retryable: false };
+              }
+
+              await WWebJS.sendMessage(chat, text, {});
+              return { success: true };
+            } catch (e) {
+              const errMsg = e?.message || String(e) || 'page.evaluate hatası';
+              const retryable = errMsg.includes('detached') || errMsg.includes('Target closed');
+              return { success: false, error: errMsg, retryable };
+            }
+          },
+          chatId,
+          text
+        );
+
+        if (result?.success) {
+          logger.info(`Mesaj gönderildi -> ${maskPhoneLike(chatId)}`);
+          return;
+        }
+
+        const evalError = result?.error || 'page.evaluate başarısız';
+        lastError = new Error(evalError);
+
+        // Retryable değilse döngüden çık
+        if (result?.retryable === false) {
+          throw lastError;
+        }
+
+        // Retry için devam et
+        throw lastError;
+
+      } catch (e) {
+        lastError = e;
+        const errMsg = e?.message || String(e) || 'Bilinmeyen hata';
+        const isRetryable = errMsg.includes('detached') ||
+                           errMsg.includes('Target closed') ||
+                           errMsg.includes('Session closed') ||
+                           errMsg.includes('Protocol error') ||
+                           errMsg.includes('WWebJS hazır değil') ||
+                           errMsg.includes('sayfası hazır değil');
+
+        if (!isRetryable || attempt >= maxRetries) {
+          logger.error(`Mesaj gönderilemedi (deneme ${attempt}/${maxRetries}): ${errMsg}`);
+          throw lastError;
+        }
+
+        logger.warn(`Mesaj gönderme hatası, yeniden deneniyor (${attempt}/${maxRetries}): ${errMsg}`);
+
+        // Bekleme süresi artarak dene (exponential backoff)
+        const waitMs = Math.min(1000 * Math.pow(2, attempt - 1), 5000);
+        await this.sleep(waitMs);
+
+        // WhatsApp sayfasını yenilemeyi dene
+        try {
+          const page = this.wa?.client?.pupPage;
+          if (page) {
+            logger.info('WhatsApp sayfası yenileniyor...');
+            await page.reload({ waitUntil: 'networkidle0', timeout: 30000 });
+            await this.sleep(2000); // Sayfa stabilize olsun
+          }
+        } catch (reloadErr) {
+          logger.warn('Sayfa yenileme başarısız:', reloadErr?.message || String(reloadErr));
+        }
+      }
     }
 
-    logger.info(`Mesaj gönderildi -> ${maskPhoneLike(chatId)}`);
+    throw lastError || new Error('Mesaj gönderilemedi (maksimum deneme aşıldı)');
   }
 
   splitMessage(text, maxLength) {
