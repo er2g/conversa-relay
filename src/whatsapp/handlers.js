@@ -609,29 +609,46 @@ class MessageHandler {
           const result = await this.processOneMessage(job.message);
           if (!result) {
             const txt = 'Hata: Yanıt boş döndü.';
-            await this.replyToMessage(job.message, txt);
-            this.db.logMessage(chatId, txt, 'outgoing');
+            try {
+              await this.replyToMessage(job.message, txt);
+              this.db.logMessage(chatId, txt, 'outgoing');
+            } catch (sendError) {
+              logger.error('Hata mesajı gönderilemedi:', sendError?.message || String(sendError));
+            }
             continue;
           }
 
           if (result.length > 4000) {
             const chunks = this.splitMessage(result, 4000);
             for (let i = 0; i < chunks.length; i++) {
-              await this.replyToMessage(job.message, chunks[i]);
-              this.db.logMessage(chatId, chunks[i], 'outgoing');
+              try {
+                await this.replyToMessage(job.message, chunks[i]);
+                this.db.logMessage(chatId, chunks[i], 'outgoing');
+              } catch (sendError) {
+                logger.error('Mesaj chunk gönderilemedi:', sendError?.message || String(sendError));
+                break;
+              }
               if (i < chunks.length - 1) {
                 await this.sleep(500);
               }
             }
           } else {
-            await this.replyToMessage(job.message, result);
-            this.db.logMessage(chatId, result, 'outgoing');
+            try {
+              await this.replyToMessage(job.message, result);
+              this.db.logMessage(chatId, result, 'outgoing');
+            } catch (sendError) {
+              logger.error('Mesaj gönderilemedi:', sendError?.message || String(sendError));
+            }
           }
         } catch (e) {
           const errorMsg = e?.message || String(e);
           const txt = `Hata: ${errorMsg}`;
-          await this.replyToMessage(job.message, txt);
-          this.db.logMessage(chatId, txt, 'outgoing');
+          try {
+            await this.replyToMessage(job.message, txt);
+            this.db.logMessage(chatId, txt, 'outgoing');
+          } catch (sendError) {
+            logger.error('Hata mesajı gönderilemedi:', sendError?.message || String(sendError));
+          }
         }
       }
     } finally {
@@ -689,6 +706,18 @@ class MessageHandler {
   async replyToMessage(originalMessage, text) {
     const chatId = originalMessage.from;
 
+    // Prefer whatsapp-web.js API (more stable than puppeteer page.evaluate).
+    try {
+      if (this.wa?.client?.sendMessage) {
+        await this.wa.client.sendMessage(chatId, text);
+        logger.info(`Mesaj gönderildi -> ${maskPhoneLike(chatId)}`);
+        return;
+      }
+    } catch (e) {
+      logger.warn('sendMessage başarısız, fallback deneniyor:', e?.message || String(e));
+    }
+
+    // Fallback: puppeteer page injection (older path).
     const page = this.wa?.client?.pupPage;
     if (!page) {
       throw new Error('WhatsApp sayfası hazır değil');
@@ -721,7 +750,7 @@ class MessageHandler {
       throw new Error(result?.error || 'Mesaj gönderilemedi');
     }
 
-    logger.info(`Mesaj gönderildi -> ${chatId}`);
+    logger.info(`Mesaj gönderildi -> ${maskPhoneLike(chatId)}`);
   }
 
   splitMessage(text, maxLength) {
