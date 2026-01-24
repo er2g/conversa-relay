@@ -1,11 +1,11 @@
 # WhatsApp AI Bridge
 
-WhatsApp Web üstünden mesajları alıp Codex/Claude orkestratörlerine ileten,
+WhatsApp Web üstünden mesajları alıp Codex/Claude/Gemini orkestratörlerine ileten,
 arka plan görevleri ve basit bir dashboard/API sunan Node.js uygulaması.
 
 ## Kurulum
 
-- Node.js: `>=18`
+- Node.js: `>=18` (Gemini CLI için `>=20`)
 - Chromium: Linux’ta genelde `/usr/bin/chromium` (değilse `CHROMIUM_PATH` ile ayarla)
 
 ```bash
@@ -27,7 +27,7 @@ cp config/sessions.example.json config/sessions.json
 - `SESSIONS_CONFIG_PATH` (varsayılan `./config/sessions.json`)
 - `DASHBOARD_USER` / `DASHBOARD_PASS` (dashboard basic auth)
 - `CHROMIUM_PATH` (varsayılan `/usr/bin/chromium`)
-- `ORCHESTRATOR_TYPE` (`claude` veya `codex`)
+- `ORCHESTRATOR_TYPE` (`claude`, `codex` veya `gemini`)
 - `MAX_MEDIA_MB` (genel medya limiti, varsayılan `8`)
 - `MAX_IMAGE_MEDIA_MB`, `MAX_DOC_MEDIA_MB`, `MAX_AUDIO_MEDIA_MB`, `MAX_VIDEO_MEDIA_MB`
 
@@ -38,6 +38,39 @@ npm run start
 ```
 
 İlk çalıştırmada QR kod çıkar; WhatsApp’tan taratınca mesajları dinlemeye başlar.
+
+## Gemini CLI entegrasyonu
+
+Gemini CLI headless modda çağrılır; interaktif panel açılmaz.
+
+Kurulum:
+
+```bash
+sudo npm install -g @google/gemini-cli@latest
+```
+
+Temel ayarlar:
+
+- `GEMINI_API_KEY` (Gemini API anahtarı) veya `GOOGLE_API_KEY` + `GOOGLE_GENAI_USE_VERTEXAI=true`
+- `GEMINI_MODEL` (opsiyonel model seçimi)
+- `GEMINI_YOLO` (`1`/`0`, varsayılan `1`)
+- `GEMINI_APPROVAL_MODE` (`default`, `auto_edit`, `yolo`)
+- `GEMINI_OUTPUT_FORMAT` (varsayılan `stream-json`)
+- `GEMINI_BIN` (gemini binary yolu; varsayılan `gemini`)
+- `GEMINI_WORKDIR` (varsayılan proje dizini)
+- `GEMINI_INCLUDE_DIRS` (ek klasorler, virgülle ayrılır)
+- `GEMINI_SESSION_STORE` (session dosya yolu; varsayılan `data/gemini-sessions.json`)
+- `GEMINI_INITIAL_INSTRUCTIONS` (opsiyonel başlangıç talimatı)
+
+Gemini kullanmak için:
+
+```bash
+export ORCHESTRATOR_TYPE=gemini
+export GEMINI_API_KEY="YOUR_API_KEY"
+npm run start
+```
+
+Not: Gemini CLI `@file` ile metin dosyalarını prompta dahil eder. Görseller burada yalnızca dosya yolu olarak not edilir.
 
 ## Fotoğraf desteği
 

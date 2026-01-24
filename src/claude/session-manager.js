@@ -1,18 +1,19 @@
 import { v4 as uuidv4 } from 'uuid';
 import ClaudeProcess from './claude-process.js';
 import CodexProcess from './process-wrapper.js';
+import GeminiProcess from '../gemini/gemini-process.js';
 import logger from '../logger.js';
 import { maskPhoneLike } from '../utils/redact.js';
 
 class SessionManager {
   constructor(db, maxSessions = 3, timeoutMinutes = 30) {
-    this.sessions = new Map(); // phoneNumber -> ClaudeProcess | CodexProcess
+    this.sessions = new Map(); // phoneNumber -> ClaudeProcess | CodexProcess | GeminiProcess
     this.db = db;
     this.maxSessions = maxSessions;
     this.timeoutMinutes = timeoutMinutes;
 
     // Orkestratör tipi: 'claude' (varsayılan) veya 'codex'
-    this.orchestratorType = process.env.ORCHESTRATOR_TYPE || 'claude';
+    this.orchestratorType = (process.env.ORCHESTRATOR_TYPE || 'claude').toLowerCase();
 
     // Periyodik timeout kontrolü
     this.cleanupInterval = setInterval(() => {
@@ -45,6 +46,8 @@ class SessionManager {
     let session;
     if (this.orchestratorType === 'codex') {
       session = new CodexProcess(sessionId, phoneNumber);
+    } else if (this.orchestratorType === 'gemini') {
+      session = new GeminiProcess(sessionId, phoneNumber);
     } else {
       session = new ClaudeProcess(sessionId, phoneNumber);
     }

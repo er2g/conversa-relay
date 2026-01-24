@@ -29,6 +29,8 @@ yarn-error.log*
 
 # Local test scripts (can contain real numbers/IDs)
 test-send*.js
+scripts/ocr-most-asked.py
+scripts/ocr_most_asked.py
 
 # OS / editor
 .DS_Store
