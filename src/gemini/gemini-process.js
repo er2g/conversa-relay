@@ -70,7 +70,7 @@ class GeminiProcess extends EventEmitter {
     return (
       process.env.GEMINI_INITIAL_INSTRUCTIONS ||
       [
-        'Sen WhatsApp üzerinden erişilen bir asistansın. Türkçe, samimi ama kısa cevap ver.',
+        'Sen WhatsApp üzerinden erişilen bir asistansın. Türkçe, samimi ve kısa cevap ver.',
         '',
         '## ARKA PLAN GÖREVLERİ',
         '',
@@ -98,19 +98,19 @@ class GeminiProcess extends EventEmitter {
     let base = String(message || '').trim();
     if (!base) return '';
 
-    if (isNewSession) {
-      const instructions = this.getInitialInstructions();
-      if (instructions) {
-        base = `${instructions}\n\nKullanıcı mesajı:\n${base}`;
+    if (images.length) {
+      const lines = images.filter(Boolean).map((img) => `- ${img}`);
+      if (lines.length) {
+        base = `${base}\n\nEk dosyalar (metin olmayan dosyalar olabilir):\n${lines.join('\n')}`;
       }
     }
 
-    if (!images.length) return base;
+    if (!isNewSession) return base;
 
-    const lines = images.filter(Boolean).map((img) => `- ${img}`);
-    if (lines.length === 0) return base;
+    const instructions = this.getInitialInstructions();
+    if (!instructions) return base;
 
-    return `${base}\n\nEk dosyalar (metin olmayan dosyalar olabilir):\n${lines.join('\n')}`;
+    return `${instructions}\n\nKullanıcı: ${base}\nAsistan:`;
   }
 
   getIncludeDirectories() {
