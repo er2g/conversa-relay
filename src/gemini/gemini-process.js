@@ -170,7 +170,7 @@ class GeminiProcess extends EventEmitter {
       args.push('--include-directories', dir);
     }
 
-    args.push('--', prompt);
+    args.push(prompt);
 
     return await new Promise((resolve) => {
       this.process = spawn(geminiBin, args, {

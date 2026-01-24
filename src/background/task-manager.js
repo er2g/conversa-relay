@@ -425,7 +425,7 @@ class BackgroundTaskManager extends EventEmitter {
       args.push('--include-directories', dir);
     }
 
-    args.push('--', fullPrompt);
+    args.push(fullPrompt);
 
     const proc = spawn(geminiBin, args, {
       env: { ...process.env },
