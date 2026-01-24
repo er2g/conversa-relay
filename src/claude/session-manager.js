@@ -14,6 +14,8 @@ class SessionManager {
 
     // Orkestratör tipi: 'claude' (varsayılan) veya 'codex'
     this.orchestratorType = (process.env.ORCHESTRATOR_TYPE || 'claude').toLowerCase();
+    this.orchestratorOverrides = new Map(); // phoneNumber -> orchestrator type
+    this.availableOrchestrators = ['claude', 'codex', 'gemini'];
 
     // Periyodik timeout kontrolü
     this.cleanupInterval = setInterval(() => {
@@ -43,14 +45,16 @@ class SessionManager {
     const sessionId = uuidv4().substring(0, 8);
 
     // Orkestratör tipine göre process oluştur
+    const orchestratorType = this.getOrchestratorType(phoneNumber);
     let session;
-    if (this.orchestratorType === 'codex') {
+    if (orchestratorType === 'codex') {
       session = new CodexProcess(sessionId, phoneNumber);
-    } else if (this.orchestratorType === 'gemini') {
+    } else if (orchestratorType === 'gemini') {
       session = new GeminiProcess(sessionId, phoneNumber);
     } else {
       session = new ClaudeProcess(sessionId, phoneNumber);
     }
+    session.orchestratorType = orchestratorType;
 
     session.on('output', (data) => {
       logger.debug(`[${sessionId}] Output: ${data.substring(0, 100)}...`);
@@ -64,9 +68,42 @@ class SessionManager {
 
     this.db.createSession(sessionId, phoneNumber);
 
-    logger.info(`Yeni oturum oluşturuldu: ${sessionId} için ${maskPhoneLike(phoneNumber)} (${this.orchestratorType})`);
+    logger.info(`Yeni oturum oluşturuldu: ${sessionId} için ${maskPhoneLike(phoneNumber)} (${orchestratorType})`);
 
     return session;
+  }
+
+  getAvailableOrchestrators() {
+    return [...this.availableOrchestrators];
+  }
+
+  getOrchestratorType(phoneNumber) {
+    return this.orchestratorOverrides.get(phoneNumber) || this.orchestratorType;
+  }
+
+  getNextOrchestratorType(phoneNumber) {
+    const list = this.getAvailableOrchestrators();
+    const current = this.getOrchestratorType(phoneNumber);
+    const idx = list.indexOf(current);
+    if (idx === -1) return list[0];
+    return list[(idx + 1) % list.length];
+  }
+
+  setOrchestratorOverride(phoneNumber, type) {
+    const normalized = String(type || '').toLowerCase().trim();
+    if (!normalized || !this.availableOrchestrators.includes(normalized)) {
+      return false;
+    }
+    if (normalized === this.orchestratorType) {
+      this.orchestratorOverrides.delete(phoneNumber);
+    } else {
+      this.orchestratorOverrides.set(phoneNumber, normalized);
+    }
+    return true;
+  }
+
+  clearOrchestratorOverride(phoneNumber) {
+    this.orchestratorOverrides.delete(phoneNumber);
   }
 
   getSession(phoneNumber) {

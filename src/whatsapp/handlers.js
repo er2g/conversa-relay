@@ -676,7 +676,8 @@ class MessageHandler {
     let body = message.body || '';
     const hasMedia = message.hasMedia === true;
 
-    const lowerBody = body.toLowerCase().trim();
+    const trimmedBody = String(body || '').trim();
+    const lowerBody = trimmedBody.toLowerCase();
 
     // Görev listesi komutu
     if (lowerBody === 'görevler' || lowerBody === 'gorevler' || lowerBody === 'tasks') {
@@ -695,6 +696,46 @@ class MessageHandler {
       const messageId = record.message_id || record.messageId || '-';
       const abs = record.absolute_path || record.absolutePath || '-';
       return `Son dosya: ${abs} (${mimetype}, ${size})\nMesaj: ${messageId}\nTarih: ${createdAt}`;
+    }
+
+    // Orkestratör değiştirme komutu
+    if (!hasMedia && lowerBody.startsWith('!!switch')) {
+      const arg = trimmedBody.slice('!!switch'.length).trim().toLowerCase();
+      const available = this.sessionManager.getAvailableOrchestrators();
+      const current = this.sessionManager.getOrchestratorType(from);
+      const defaultType = this.sessionManager.orchestratorType;
+
+      if (!arg || arg === 'next') {
+        const nextType = this.sessionManager.getNextOrchestratorType(from);
+        if (nextType === current) {
+          return `Zaten ${current} kullanılıyor.`;
+        }
+        this.sessionManager.setOrchestratorOverride(from, nextType);
+        await this.sessionManager.endSession(from);
+        return `Orkestratör ${nextType} olarak değiştirildi.`;
+      }
+
+      if (arg === 'list' || arg === 'help' || arg === '?') {
+        return `Mevcut: ${current}\nVarsayılan: ${defaultType}\nSeçenekler: ${available.join(', ')}`;
+      }
+
+      if (arg === 'default') {
+        this.sessionManager.clearOrchestratorOverride(from);
+        await this.sessionManager.endSession(from);
+        return `Orkestratör varsayılan (${defaultType}) olarak ayarlandı.`;
+      }
+
+      if (!available.includes(arg)) {
+        return `Bilinmeyen orkestratör: ${arg}\nSeçenekler: ${available.join(', ')}`;
+      }
+
+      if (arg === current) {
+        return `Zaten ${current} kullanılıyor.`;
+      }
+
+      this.sessionManager.setOrchestratorOverride(from, arg);
+      await this.sessionManager.endSession(from);
+      return `Orkestratör ${arg} olarak değiştirildi.`;
     }
 
     // Normal akış - AI karar verecek

@@ -95,6 +95,12 @@ Istege bagli ayarlar:
 - Medya caption'i varsa "Medya notu" olarak saklanir.
 - Kullanici bir sonraki mesaj attiginda son sistem notlari prompta eklenir.
 
+## Komutlar
+
+- `gorevler` / `görevler` / `tasks`: Arka plan görevlerini listeler.
+- `son dosya`: Son kaydedilen dosya bilgisini gosterir.
+- `!!switch [claude|codex|gemini|default]`: Orkestratörü degistirir (`!!switch` = bir sonrakine gec).
+
 ## Güvenlik notu
 
 `data/` ve `config/sessions.json` Git’e alınmaz (session/numara/DB/log içerir). Repo’ya sadece örnek config eklenir.
