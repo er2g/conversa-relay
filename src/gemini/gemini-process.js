@@ -160,7 +160,7 @@ class GeminiProcess extends EventEmitter {
     if (outputFormat) {
       args.push('--output-format', outputFormat);
     }
-    if (approvalMode) {
+    if (approvalMode && approvalMode !== 'yolo') {
       args.push('--approval-mode', approvalMode);
     }
     if (approvalMode === 'yolo') {
