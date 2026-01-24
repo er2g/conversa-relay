@@ -802,6 +802,7 @@ class MessageHandler {
         }
         this.sessionManager.setOrchestratorOverride(from, nextType);
         await this.sessionManager.endSession(from);
+        await this.sessionManager.resetStoredState(from, nextType);
         this.addSystemNote(from, this.buildSwitchHandoffNote(from, current, nextType));
         return `Orkestratör ${nextType} olarak değiştirildi.`;
       }
@@ -813,6 +814,7 @@ class MessageHandler {
       if (arg === 'default') {
         this.sessionManager.clearOrchestratorOverride(from);
         await this.sessionManager.endSession(from);
+        await this.sessionManager.resetStoredState(from, defaultType);
         this.addSystemNote(from, this.buildSwitchHandoffNote(from, current, defaultType));
         return `Orkestratör varsayılan (${defaultType}) olarak ayarlandı.`;
       }
@@ -827,6 +829,7 @@ class MessageHandler {
 
       this.sessionManager.setOrchestratorOverride(from, arg);
       await this.sessionManager.endSession(from);
+      await this.sessionManager.resetStoredState(from, arg);
       this.addSystemNote(from, this.buildSwitchHandoffNote(from, current, arg));
       return `Orkestratör ${arg} olarak değiştirildi.`;
     }

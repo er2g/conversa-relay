@@ -1,9 +1,12 @@
 import { v4 as uuidv4 } from 'uuid';
+import fs from 'fs/promises';
+import path from 'path';
 import ClaudeProcess from './claude-process.js';
 import CodexProcess from './process-wrapper.js';
 import GeminiProcess from '../gemini/gemini-process.js';
 import logger from '../logger.js';
 import { maskPhoneLike } from '../utils/redact.js';
+import { paths } from '../paths.js';
 
 class SessionManager {
   constructor(db, maxSessions = 3, timeoutMinutes = 30) {
@@ -104,6 +107,41 @@ class SessionManager {
 
   clearOrchestratorOverride(phoneNumber) {
     this.orchestratorOverrides.delete(phoneNumber);
+  }
+
+  getClaudeSessionStorePath() {
+    return process.env.CLAUDE_SESSION_STORE || path.join(paths.dataDir, 'claude-sessions.json');
+  }
+
+  getCodexThreadStorePath() {
+    return process.env.CODEX_THREAD_STORE || path.join(paths.dataDir, 'codex-threads.json');
+  }
+
+  getGeminiSessionStorePath() {
+    return process.env.GEMINI_SESSION_STORE || path.join(paths.dataDir, 'gemini-sessions.json');
+  }
+
+  async resetStoredState(phoneNumber, orchestratorType) {
+    const type = String(orchestratorType || '').toLowerCase().trim();
+    let storePath = null;
+    if (type === 'claude') storePath = this.getClaudeSessionStorePath();
+    if (type === 'codex') storePath = this.getCodexThreadStorePath();
+    if (type === 'gemini') storePath = this.getGeminiSessionStorePath();
+    if (!storePath) return false;
+
+    try {
+      const raw = await fs.readFile(storePath, 'utf8');
+      const data = JSON.parse(raw) || {};
+      if (data && Object.prototype.hasOwnProperty.call(data, phoneNumber)) {
+        delete data[phoneNumber];
+        await fs.mkdir(path.dirname(storePath), { recursive: true });
+        await fs.writeFile(storePath, JSON.stringify(data, null, 2) + '\n');
+        return true;
+      }
+    } catch {
+      // ignore missing/invalid file
+    }
+    return false;
   }
 
   getSession(phoneNumber) {
