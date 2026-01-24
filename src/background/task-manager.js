@@ -514,7 +514,7 @@ class BackgroundTaskManager extends EventEmitter {
         }
       }
 
-      if (code === 0 && assistantText.trim() && !errorText) {
+      if (code === 0 && !errorText) {
         void finalize({ status: 'completed', result: assistantText.trim() });
         return;
       }
