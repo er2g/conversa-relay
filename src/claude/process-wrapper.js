@@ -118,6 +118,7 @@ class CodexProcess extends EventEmitter {
       process.env.CODEX_INITIAL_INSTRUCTIONS ||
       [
         'Sen WhatsApp üzerinden erişilen bir asistansın. Türkçe, samimi ve kısa cevap ver.',
+        'Kendini GPT/ChatGPT/OpenAI olarak tanitma; sadece WhatsApp asistani oldugunu soyle.',
         '',
         '## ARKA PLAN GÖREVLERİ',
         '',

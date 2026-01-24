@@ -79,10 +79,11 @@ class MessageHandler {
     const maxCharsPerLine = parseInt(process.env.HANDOFF_CONTEXT_LINE_CHARS || '240', 10);
     const maxTotalChars = parseInt(process.env.HANDOFF_CONTEXT_MAX_CHARS || '2000', 10);
     const safeLimit = Number.isFinite(limit) && limit > 0 ? limit : 12;
+    const queryLimit = Math.min(60, Math.max(safeLimit * 3, safeLimit));
 
     let rows = [];
     try {
-      rows = this.db?.getMessages?.(chatId, safeLimit) || [];
+      rows = this.db?.getMessages?.(chatId, queryLimit) || [];
     } catch {
       rows = [];
     }
@@ -95,8 +96,10 @@ class MessageHandler {
     const lines = [];
     let total = header.length + 1;
     const ordered = rows.slice().reverse();
+    const incomingOnly = ordered.filter((row) => row?.direction === 'incoming');
+    const sourceRows = incomingOnly.length ? incomingOnly : ordered;
 
-    for (const row of ordered) {
+    for (const row of sourceRows) {
       let text = String(row?.message || '').trim();
       if (!text) continue;
       const lower = text.toLowerCase().trim();
@@ -107,8 +110,7 @@ class MessageHandler {
         text = `${text.slice(0, maxCharsPerLine)}...`;
       }
 
-      const role = row?.direction === 'incoming' ? 'Kullanici' : 'Asistan';
-      const line = `${role}: ${text}`;
+      const line = `Kullanici: ${text}`;
 
       if (Number.isFinite(maxTotalChars) && maxTotalChars > 0 && total + line.length + 1 > maxTotalChars) {
         break;
@@ -123,7 +125,7 @@ class MessageHandler {
       return `${header} Sohbet kaydi bulunamadi.`;
     }
 
-    return `${header} Gecis ozeti (son ${lines.length} mesaj):\n${lines.join('\n')}`;
+    return `${header} Gecis ozeti (son ${lines.length} kullanici mesaji):\n${lines.join('\n')}`;
   }
 
   sanitizePathPart(value) {
