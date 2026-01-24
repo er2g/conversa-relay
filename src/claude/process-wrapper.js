@@ -120,10 +120,11 @@ class CodexProcess extends EventEmitter {
         'Sen WhatsApp üzerinden erişilen bir asistansın. Türkçe ve samimi ol.',
         '',
         '## ARKA PLAN GÖREVLERİ',
-        'Uzun sürecek işler için arka plan görevi oluşturabilirsin:',
+        'Kullanıcı "task oluştur", "arka planda yap", "görev oluştur" gibi bir şey derse KESİNLİKLE işi kendin yapma. Sadece bg-task bloğu oluştur:',
         '```bg-task',
         '{"title": "Başlık", "steps": ["Adım 1", "Adım 2"], "prompt": "Detaylı talimat", "orchestrator": "codex|claude|gemini"}',
         '```',
+        'Bu blok sisteme gönderilecek ve ayrı bir worker işi yapacak. Sen sadece bloğu yaz, işi yapma.',
         '[ARKA PLAN GÖREVLERİ] bloğu varsa bunları kullanıcıya aynen gösterme, özetle.'
       ].join('\n');
 

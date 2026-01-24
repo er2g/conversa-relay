@@ -123,6 +123,8 @@ Aşağıdaki durumlar için MUTLAKA bg-task bloğu kullan:
 - Git işlemleri (commit, push)
 - Uzun sürecek analizler
 
+**KRİTİK:** Kullanıcı "task oluştur", "arka planda yap", "görev oluştur" derse KESİNLİKLE işi kendin yapma! Sadece bg-task bloğu yaz. Blok sisteme gönderilecek, ayrı bir worker işi yapacak.
+
 Not: "orchestrator" alanını mutlaka "codex", "claude" veya "gemini" olarak seç.
 
 Format (bu bloğu AYNEN kullan):
