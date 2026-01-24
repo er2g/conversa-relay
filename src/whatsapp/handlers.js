@@ -7,6 +7,8 @@ import logger from '../logger.js';
 import { paths } from '../paths.js';
 import { taskManager } from '../background/task-manager.js';
 import { maskPhoneLike } from '../utils/redact.js';
+import SwitchHandler from '../orchestrator/switch-handler.js';
+import orchestratorManager from '../orchestrator/orchestrator-manager.js';
 import {
   buildMediaDownloadUrl,
   downloadAndDecryptToFile,
@@ -28,6 +30,11 @@ class MessageHandler {
     this.pendingJobs = new Map(); // chatId -> Job[]
     this.lastSavedFileByChat = new Map(); // chatId -> last file info
     this.systemNotesByChat = new Map(); // chatId -> string[]
+
+    // Yeni switch handler - addSystemNote callback'i ile
+    this.switchHandler = new SwitchHandler(sessionManager, db, {
+      addSystemNote: (chatId, note) => this.addSystemNote(chatId, note)
+    });
   }
 
   loadConfig() {
@@ -788,50 +795,10 @@ class MessageHandler {
       return `Son dosya: ${abs} (${mimetype}, ${size})\nMesaj: ${messageId}\nTarih: ${createdAt}`;
     }
 
-    // Orkestratör değiştirme komutu
-    if (!hasMedia && lowerBody.startsWith('!!switch')) {
-      const arg = trimmedBody.slice('!!switch'.length).trim().toLowerCase();
-      const available = this.sessionManager.getAvailableOrchestrators();
-      const current = this.sessionManager.getOrchestratorType(from);
-      const defaultType = this.sessionManager.orchestratorType;
-
-      if (!arg || arg === 'next') {
-        const nextType = this.sessionManager.getNextOrchestratorType(from);
-        if (nextType === current) {
-          return `Zaten ${current} kullanılıyor.`;
-        }
-        this.sessionManager.setOrchestratorOverride(from, nextType);
-        await this.sessionManager.endSession(from);
-        await this.sessionManager.resetStoredState(from, nextType);
-        this.addSystemNote(from, this.buildSwitchHandoffNote(from, current, nextType));
-        return `Orkestratör ${nextType} olarak değiştirildi.`;
-      }
-
-      if (arg === 'list' || arg === 'help' || arg === '?') {
-        return `Mevcut: ${current}\nVarsayılan: ${defaultType}\nSeçenekler: ${available.join(', ')}`;
-      }
-
-      if (arg === 'default') {
-        this.sessionManager.clearOrchestratorOverride(from);
-        await this.sessionManager.endSession(from);
-        await this.sessionManager.resetStoredState(from, defaultType);
-        this.addSystemNote(from, this.buildSwitchHandoffNote(from, current, defaultType));
-        return `Orkestratör varsayılan (${defaultType}) olarak ayarlandı.`;
-      }
-
-      if (!available.includes(arg)) {
-        return `Bilinmeyen orkestratör: ${arg}\nSeçenekler: ${available.join(', ')}`;
-      }
-
-      if (arg === current) {
-        return `Zaten ${current} kullanılıyor.`;
-      }
-
-      this.sessionManager.setOrchestratorOverride(from, arg);
-      await this.sessionManager.endSession(from);
-      await this.sessionManager.resetStoredState(from, arg);
-      this.addSystemNote(from, this.buildSwitchHandoffNote(from, current, arg));
-      return `Orkestratör ${arg} olarak değiştirildi.`;
+    // Orkestratör değiştirme komutu (!!switch, !!asistan, !!ai)
+    if (!hasMedia && this.switchHandler.isSwitch(lowerBody)) {
+      const response = await this.switchHandler.handle(from, trimmedBody);
+      return response;
     }
 
     // Normal akış - AI karar verecek

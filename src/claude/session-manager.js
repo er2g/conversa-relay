@@ -4,6 +4,7 @@ import path from 'path';
 import ClaudeProcess from './claude-process.js';
 import CodexProcess from './process-wrapper.js';
 import GeminiProcess from '../gemini/gemini-process.js';
+import orchestratorManager from '../orchestrator/orchestrator-manager.js';
 import logger from '../logger.js';
 import { maskPhoneLike } from '../utils/redact.js';
 import { paths } from '../paths.js';
@@ -15,17 +16,13 @@ class SessionManager {
     this.maxSessions = maxSessions;
     this.timeoutMinutes = timeoutMinutes;
 
-    // Orkestratör tipi: 'claude' (varsayılan) veya 'codex'
-    this.orchestratorType = (process.env.ORCHESTRATOR_TYPE || 'claude').toLowerCase();
-    this.orchestratorOverrides = new Map(); // phoneNumber -> orchestrator type
-    this.availableOrchestrators = ['claude', 'codex', 'gemini'];
-
     // Periyodik timeout kontrolü
     this.cleanupInterval = setInterval(() => {
       this.cleanupTimedOutSessions();
     }, 60000);
 
-    logger.info(`Session Manager başlatıldı - Orkestratör: ${this.orchestratorType.toUpperCase()}`);
+    const defaultOrch = orchestratorManager.defaultOrchestrator;
+    logger.info(`Session Manager başlatıldı - Varsayılan Orkestratör: ${defaultOrch.toUpperCase()}`);
   }
 
   async createSession(phoneNumber) {
@@ -47,8 +44,9 @@ class SessionManager {
 
     const sessionId = uuidv4().substring(0, 8);
 
-    // Orkestratör tipine göre process oluştur
-    const orchestratorType = this.getOrchestratorType(phoneNumber);
+    // OrchestratorManager'dan kullanıcının tercih ettiği orkestratörü al
+    const orchestratorType = await orchestratorManager.getOrchestrator(phoneNumber);
+
     let session;
     if (orchestratorType === 'codex') {
       session = new CodexProcess(sessionId, phoneNumber);
@@ -76,37 +74,36 @@ class SessionManager {
     return session;
   }
 
+  // Orkestratör yönetimi artık OrchestratorManager üzerinden yapılıyor
+  // Bu metodlar geriye uyumluluk için korunuyor
+
   getAvailableOrchestrators() {
-    return [...this.availableOrchestrators];
+    return orchestratorManager.getAvailableOrchestrators();
   }
 
-  getOrchestratorType(phoneNumber) {
-    return this.orchestratorOverrides.get(phoneNumber) || this.orchestratorType;
+  async getOrchestratorType(phoneNumber) {
+    return orchestratorManager.getOrchestrator(phoneNumber);
   }
 
-  getNextOrchestratorType(phoneNumber) {
+  async getNextOrchestratorType(phoneNumber) {
     const list = this.getAvailableOrchestrators();
-    const current = this.getOrchestratorType(phoneNumber);
+    const current = await this.getOrchestratorType(phoneNumber);
     const idx = list.indexOf(current);
     if (idx === -1) return list[0];
     return list[(idx + 1) % list.length];
   }
 
-  setOrchestratorOverride(phoneNumber, type) {
-    const normalized = String(type || '').toLowerCase().trim();
-    if (!normalized || !this.availableOrchestrators.includes(normalized)) {
-      return false;
-    }
-    if (normalized === this.orchestratorType) {
-      this.orchestratorOverrides.delete(phoneNumber);
-    } else {
-      this.orchestratorOverrides.set(phoneNumber, normalized);
-    }
-    return true;
+  async setOrchestratorOverride(phoneNumber, type) {
+    const result = await orchestratorManager.setOrchestrator(phoneNumber, type);
+    return result.success;
   }
 
-  clearOrchestratorOverride(phoneNumber) {
-    this.orchestratorOverrides.delete(phoneNumber);
+  async clearOrchestratorOverride(phoneNumber) {
+    await orchestratorManager.resetToDefault(phoneNumber);
+  }
+
+  get orchestratorType() {
+    return orchestratorManager.defaultOrchestrator;
   }
 
   getClaudeSessionStorePath() {
