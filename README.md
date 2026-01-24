@@ -101,6 +101,13 @@ Istege bagli ayarlar:
 - `son dosya`: Son kaydedilen dosya bilgisini gosterir.
 - `!!switch [claude|codex|gemini|default]`: Orkestratörü degistirir (`!!switch` = bir sonrakine gec).
 
+`!!switch` ile orkestrator degistiginde, bir sonraki mesajda tek seferlik sohbet ozeti sistem notu olarak eklenir.
+Opsiyonel ayarlar:
+
+- `HANDOFF_CONTEXT_LIMIT` (varsayilan `12`)
+- `HANDOFF_CONTEXT_LINE_CHARS` (varsayilan `240`)
+- `HANDOFF_CONTEXT_MAX_CHARS` (varsayilan `2000`)
+
 ## Arka plan görevleri (bg-task)
 
 AI arka plan görevi baslatirken `bg-task` JSON'unda `orchestrator` alanini seçer:

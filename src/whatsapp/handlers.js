@@ -65,6 +65,58 @@ class MessageHandler {
     return null;
   }
 
+  buildSwitchHandoffNote(chatId, fromOrchestrator, toOrchestrator) {
+    const limit = parseInt(process.env.HANDOFF_CONTEXT_LIMIT || '12', 10);
+    const maxCharsPerLine = parseInt(process.env.HANDOFF_CONTEXT_LINE_CHARS || '240', 10);
+    const maxTotalChars = parseInt(process.env.HANDOFF_CONTEXT_MAX_CHARS || '2000', 10);
+    const safeLimit = Number.isFinite(limit) && limit > 0 ? limit : 12;
+
+    let rows = [];
+    try {
+      rows = this.db?.getMessages?.(chatId, safeLimit) || [];
+    } catch {
+      rows = [];
+    }
+
+    const header = `Orkestrator degisti: ${fromOrchestrator} -> ${toOrchestrator}.`;
+    if (!rows.length) {
+      return `${header} Sohbet kaydi bulunamadi.`;
+    }
+
+    const lines = [];
+    let total = header.length + 1;
+    const ordered = rows.slice().reverse();
+
+    for (const row of ordered) {
+      let text = String(row?.message || '').trim();
+      if (!text) continue;
+      const lower = text.toLowerCase().trim();
+      if (lower.startsWith('!!switch')) continue;
+
+      text = text.replace(/\s+/g, ' ').trim();
+      if (Number.isFinite(maxCharsPerLine) && maxCharsPerLine > 0 && text.length > maxCharsPerLine) {
+        text = `${text.slice(0, maxCharsPerLine)}...`;
+      }
+
+      const role = row?.direction === 'incoming' ? 'Kullanici' : 'Asistan';
+      const line = `${role}: ${text}`;
+
+      if (Number.isFinite(maxTotalChars) && maxTotalChars > 0 && total + line.length + 1 > maxTotalChars) {
+        break;
+      }
+
+      lines.push(line);
+      total += line.length + 1;
+      if (lines.length >= safeLimit) break;
+    }
+
+    if (lines.length === 0) {
+      return `${header} Sohbet kaydi bulunamadi.`;
+    }
+
+    return `${header} Gecis ozeti (son ${lines.length} mesaj):\n${lines.join('\n')}`;
+  }
+
   sanitizePathPart(value) {
     return String(value || '')
       .replace(/[^a-zA-Z0-9._-]/g, '_')
@@ -739,6 +791,7 @@ class MessageHandler {
         }
         this.sessionManager.setOrchestratorOverride(from, nextType);
         await this.sessionManager.endSession(from);
+        this.addSystemNote(from, this.buildSwitchHandoffNote(from, current, nextType));
         return `Orkestratör ${nextType} olarak değiştirildi.`;
       }
 
@@ -749,6 +802,7 @@ class MessageHandler {
       if (arg === 'default') {
         this.sessionManager.clearOrchestratorOverride(from);
         await this.sessionManager.endSession(from);
+        this.addSystemNote(from, this.buildSwitchHandoffNote(from, current, defaultType));
         return `Orkestratör varsayılan (${defaultType}) olarak ayarlandı.`;
       }
 
@@ -762,6 +816,7 @@ class MessageHandler {
 
       this.sessionManager.setOrchestratorOverride(from, arg);
       await this.sessionManager.endSession(from);
+      this.addSystemNote(from, this.buildSwitchHandoffNote(from, current, arg));
       return `Orkestratör ${arg} olarak değiştirildi.`;
     }
 
