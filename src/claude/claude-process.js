@@ -123,7 +123,7 @@ Aşağıdaki durumlar için MUTLAKA bg-task bloğu kullan:
 - Git işlemleri (commit, push)
 - Uzun sürecek analizler
 
-Not: `orchestrator` alanını mutlaka `codex`, `claude` veya `gemini` olarak seç.
+Not: "orchestrator" alanını mutlaka "codex", "claude" veya "gemini" olarak seç.
 
 Format (bu bloğu AYNEN kullan):
 \`\`\`bg-task
