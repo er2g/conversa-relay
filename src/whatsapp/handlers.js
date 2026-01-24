@@ -65,6 +65,15 @@ class MessageHandler {
     return null;
   }
 
+  formatMessageTimestampForPrompt(message) {
+    const iso = this.getMessageCreatedAtISO(message);
+    const date = new Date(iso);
+    if (Number.isNaN(date.getTime())) {
+      return iso;
+    }
+    return date.toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, ' UTC');
+  }
+
   buildSwitchHandoffNote(chatId, fromOrchestrator, toOrchestrator) {
     const limit = parseInt(process.env.HANDOFF_CONTEXT_LIMIT || '12', 10);
     const maxCharsPerLine = parseInt(process.env.HANDOFF_CONTEXT_LINE_CHARS || '240', 10);
@@ -948,7 +957,9 @@ class MessageHandler {
     const systemNotes = this.consumeSystemNotes(from);
     const systemBlock = this.formatSystemNotes(systemNotes);
     const taskSummary = this.getActiveTasksSummary(from);
-    const prompt = `${basePrompt}${systemBlock}${taskSummary || ''}`;
+    const messageTimestamp = this.formatMessageTimestampForPrompt(message);
+    const timestampBlock = `\n\n[MESAJ ZAMANI]\n${messageTimestamp}\n[/MESAJ ZAMANI]\n`;
+    const prompt = `${basePrompt}${timestampBlock}${systemBlock}${taskSummary || ''}`;
 
     const response = await session.execute(prompt, { images });
 
