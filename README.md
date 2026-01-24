@@ -101,6 +101,22 @@ Istege bagli ayarlar:
 - `son dosya`: Son kaydedilen dosya bilgisini gosterir.
 - `!!switch [claude|codex|gemini|default]`: Orkestratörü degistirir (`!!switch` = bir sonrakine gec).
 
+## Arka plan görevleri (bg-task)
+
+AI arka plan görevi baslatirken `bg-task` JSON'unda `orchestrator` alanini seçer:
+
+```json
+{"title":"...","steps":["..."],"prompt":"...","orchestrator":"codex|claude|gemini"}
+```
+
+Varsayilan fallback sirasiyla: `BG_ORCHESTRATOR` → `BACKGROUND_ORCHESTRATOR` → `ORCHESTRATOR_TYPE` → `codex`.
+
+Arka plan ayarlari (opsiyonel):
+
+- `CODEX_BG_INSTRUCTIONS`, `CODEX_BG_TIMEOUT_MS`
+- `CLAUDE_BG_INSTRUCTIONS`, `CLAUDE_BG_MODEL`, `CLAUDE_BG_TIMEOUT_MS`
+- `GEMINI_BG_INSTRUCTIONS`, `GEMINI_BG_MODEL`, `GEMINI_BG_OUTPUT_FORMAT`, `GEMINI_BG_APPROVAL_MODE`, `GEMINI_BG_YOLO`, `GEMINI_BG_TIMEOUT_MS`
+
 ## Güvenlik notu
 
 `data/` ve `config/sessions.json` Git’e alınmaz (session/numara/DB/log içerir). Repo’ya sadece örnek config eklenir.

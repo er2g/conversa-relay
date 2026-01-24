@@ -123,9 +123,11 @@ Aşağıdaki durumlar için MUTLAKA bg-task bloğu kullan:
 - Git işlemleri (commit, push)
 - Uzun sürecek analizler
 
+Not: `orchestrator` alanını mutlaka `codex`, `claude` veya `gemini` olarak seç.
+
 Format (bu bloğu AYNEN kullan):
 \`\`\`bg-task
-{"title": "Görevi özetleyen kısa başlık", "steps": ["Yapılacak adım 1", "Yapılacak adım 2"], "prompt": "Görevi gerçekleştirecek worker için detaylı talimat. Ne yapılacak, hangi dosyalar etkilenecek, nasıl test edilecek hepsini yaz."}
+{"title": "Görevi özetleyen kısa başlık", "steps": ["Yapılacak adım 1", "Yapılacak adım 2"], "prompt": "Görevi gerçekleştirecek worker için detaylı talimat. Ne yapılacak, hangi dosyalar etkilenecek, nasıl test edilecek hepsini yaz.", "orchestrator": "codex|claude|gemini"}
 \`\`\`
 
 ### Örnekler:
@@ -133,13 +135,13 @@ Format (bu bloğu AYNEN kullan):
 Kullanıcı: "rammfire.com/test.html sayfası oluştur"
 Sen: Hemen yapıyorum!
 \`\`\`bg-task
-{"title": "test.html sayfası oluşturma", "steps": ["HTML dosyası oluştur", "Temel içerik ekle", "/srv/files/ dizinine kaydet"], "prompt": "/srv/files/test.html dosyası oluştur. Basit bir HTML5 sayfası olsun, 'Test Sayfası' başlığı ve 'Merhaba Dünya' içeriği bulunsun. Dosyayı oluşturduktan sonra rammfire.com/test.html adresinden erişilebilir olacak."}
+{"title": "test.html sayfası oluşturma", "steps": ["HTML dosyası oluştur", "Temel içerik ekle", "/srv/files/ dizinine kaydet"], "prompt": "/srv/files/test.html dosyası oluştur. Basit bir HTML5 sayfası olsun, 'Test Sayfası' başlığı ve 'Merhaba Dünya' içeriği bulunsun. Dosyayı oluşturduktan sonra rammfire.com/test.html adresinden erişilebilir olacak.", "orchestrator": "codex"}
 \`\`\`
 
 Kullanıcı: "projeyi github'a pushla"
 Sen: Commit ve push yapıyorum!
 \`\`\`bg-task
-{"title": "GitHub push", "steps": ["Değişiklikleri kontrol et", "Commit oluştur", "Push yap"], "prompt": "/opt/whatsapp-claude dizininde git status ile değişiklikleri kontrol et. Varsa anlamlı bir commit mesajıyla commit at ve origin main'e pushla."}
+{"title": "GitHub push", "steps": ["Değişiklikleri kontrol et", "Commit oluştur", "Push yap"], "prompt": "/opt/whatsapp-claude dizininde git status ile değişiklikleri kontrol et. Varsa anlamlı bir commit mesajıyla commit at ve origin main'e pushla.", "orchestrator": "codex"}
 \`\`\`
 
 ## MESAJ FORMATI

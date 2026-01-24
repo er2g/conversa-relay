@@ -52,6 +52,19 @@ class MessageHandler {
     return String(value).replace(/\D/g, '');
   }
 
+  normalizeTaskOrchestrator(value) {
+    const raw = String(value || '').trim().toLowerCase();
+    if (!raw) return null;
+
+    if (raw === 'default' || raw === 'auto') return null;
+    if (raw.startsWith('gemini')) return 'gemini';
+    if (raw.startsWith('claude') || raw === 'anthropic') return 'claude';
+    if (raw.startsWith('codex') || raw.startsWith('openai') || raw.startsWith('gpt')) return 'codex';
+    if (raw === 'sonnet' || raw === 'haiku' || raw === 'opus') return 'claude';
+
+    return null;
+  }
+
   sanitizePathPart(value) {
     return String(value || '')
       .replace(/[^a-zA-Z0-9._-]/g, '_')
@@ -537,6 +550,9 @@ class MessageHandler {
   async startBackgroundTask(message, taskPlan, images = []) {
     const from = message.from;
     const maxTasks = parseInt(process.env.MAX_BG_TASKS_PER_USER || '3', 10);
+    const fallbackOrchestrator =
+      taskPlan?.fallbackOrchestrator || this.sessionManager.getOrchestratorType(from);
+    const selectedOrchestrator = taskPlan?.orchestrator || fallbackOrchestrator;
 
     // Aktif görev limiti kontrol
     const activeCount = taskManager.getActiveTaskCount(from);
@@ -553,6 +569,7 @@ class MessageHandler {
       description,
       prompt,
       images,
+      orchestrator: selectedOrchestrator,
       onComplete: async (completedTask) => {
         try {
           let resultText;
@@ -579,6 +596,9 @@ class MessageHandler {
 
     // Kullanıcıya gösterilecek mesaj (AI'ın hazırladığı plan)
     let userMessage = `🚀 *${title}*\n\n`;
+    if (selectedOrchestrator) {
+      userMessage += `🤖 Orkestratör: ${selectedOrchestrator}\n\n`;
+    }
 
     if (steps && steps.length > 0) {
       userMessage += `📋 Plan:\n`;
@@ -614,8 +634,14 @@ class MessageHandler {
       }[task.status] || '❓ Bilinmiyor';
 
       const duration = this.getTaskDuration(task);
+      const orchestratorLabel = task.orchestrator
+        ? `${task.orchestrator}${task.model ? ` (${task.model})` : ''}`
+        : '';
       lines.push(`${status}`);
       lines.push(`  📝 ${task.description}`);
+      if (orchestratorLabel) {
+        lines.push(`  🤖 ${orchestratorLabel}`);
+      }
       lines.push(`  🆔 \`${task.id}\``);
       lines.push(`  ⏱️ ${duration}`);
       lines.push('');
@@ -656,7 +682,8 @@ class MessageHandler {
       summary += `Şu an çalışan ${running.length} görev var:\n`;
       for (const task of running) {
         const duration = this.getTaskDuration(task);
-        summary += `- "${task.description}" (${duration}dir çalışıyor)\n`;
+        const orch = task.orchestrator ? `, ${task.orchestrator}` : '';
+        summary += `- "${task.description}" (${duration}dir çalışıyor${orch})\n`;
       }
     }
 
@@ -904,10 +931,18 @@ class MessageHandler {
         return null;
       }
 
+      const orchestrator = this.normalizeTaskOrchestrator(
+        json.orchestrator ?? json.model ?? json.ai
+      );
+      if (!orchestrator) {
+        logger.warn('bg-task orkestratör belirtilmedi, varsayılan kullanılacak');
+      }
+
       return {
         title: String(json.title),
         steps: Array.isArray(json.steps) ? json.steps.map(String) : [],
-        prompt: String(json.prompt)
+        prompt: String(json.prompt),
+        orchestrator
       };
     } catch (e) {
       logger.warn('bg-task JSON parse hatası:', e.message);
