@@ -8,6 +8,7 @@ import { paths } from '../paths.js';
 import { taskManager } from '../background/task-manager.js';
 import { maskPhoneLike } from '../utils/redact.js';
 import SwitchHandler from '../orchestrator/switch-handler.js';
+import TerminalHandler from '../orchestrator/terminal-handler.js';
 import orchestratorManager from '../orchestrator/orchestrator-manager.js';
 import {
   buildMediaDownloadUrl,
@@ -33,6 +34,11 @@ class MessageHandler {
 
     // Yeni switch handler - addSystemNote callback'i ile
     this.switchHandler = new SwitchHandler(sessionManager, db, {
+      addSystemNote: (chatId, note) => this.addSystemNote(chatId, note)
+    });
+
+    // Terminal session handler
+    this.terminalHandler = new TerminalHandler(sessionManager, {
       addSystemNote: (chatId, note) => this.addSystemNote(chatId, note)
     });
   }
@@ -795,16 +801,29 @@ class MessageHandler {
       return `Son dosya: ${abs} (${mimetype}, ${size})\nMesaj: ${messageId}\nTarih: ${createdAt}`;
     }
 
+    // Terminal session komutları (!!new, !!tlist, !!tchange, !!trename, !!tdelete, !!help)
+    if (!hasMedia && this.terminalHandler.isTerminalCommand(lowerBody)) {
+      return this.terminalHandler.handle(from, trimmedBody);
+    }
+
     // Orkestratör değiştirme komutu (!!switch, !!asistan, !!ai)
     if (!hasMedia && this.switchHandler.isSwitch(lowerBody)) {
+      // Switch öncesi aktif terminal session'ı kaydet
+      await this.terminalHandler.snapshotActiveSession(from).catch(() => {});
       const response = await this.switchHandler.handle(from, trimmedBody);
       return response;
     }
+
+    // Lazy terminal geçişi: aktif terminal değiştiyse session'ı yenile
+    await this.terminalHandler.ensureCorrectTerminal(from);
 
     // Normal akış - AI karar verecek
     let session = this.sessionManager.getSession(from);
     if (!session) {
       session = await this.sessionManager.createSession(from);
+      // Session'a terminal key'ini ata (lazy detection için)
+      const termInfo = this.terminalHandler.getActiveLabel(from);
+      session._terminalKey = termInfo?.key || null;
       logger.info(`Yeni oturum oluşturuldu: ${maskPhoneLike(from)}`);
     }
 
@@ -945,6 +964,9 @@ class MessageHandler {
       // Limit aşıldıysa normal yanıtı göster
     }
 
+    // Terminal session state'ini otomatik kaydet
+    this.terminalHandler.autoSave(from).catch(() => {});
+
     // Normal yanıt - task plan marker'ını temizle
     return this.cleanResponse(response);
   }
@@ -1021,8 +1043,11 @@ class MessageHandler {
             continue;
           }
 
-          if (result.length > 4000) {
-            const chunks = this.splitMessage(result, 4000);
+          // AI yanıtına terminal etiketi ekle
+          const tagged = this.addTerminalPrefix(chatId, result);
+
+          if (tagged.length > 4000) {
+            const chunks = this.splitMessage(tagged, 4000);
             for (let i = 0; i < chunks.length; i++) {
               try {
                 await this.replyToMessage(job.message, chunks[i]);
@@ -1037,8 +1062,8 @@ class MessageHandler {
             }
           } else {
             try {
-              await this.replyToMessage(job.message, result);
-              this.db.logMessage(chatId, result, 'outgoing');
+              await this.replyToMessage(job.message, tagged);
+              this.db.logMessage(chatId, tagged, 'outgoing');
             } catch (sendError) {
               logger.error('Mesaj gönderilemedi:', sendError?.message || String(sendError));
             }
@@ -1058,6 +1083,28 @@ class MessageHandler {
     } finally {
       this.processingQueue.set(chatId, false);
     }
+  }
+
+  /**
+   * Mesajın kuyruk-bypass edilecek anında çalışan komut olup olmadığını kontrol et
+   */
+  isInstantCommand(text) {
+    if (!text) return false;
+    const lower = String(text).toLowerCase().trim();
+    if (this.terminalHandler.isTerminalCommand(lower)) return true;
+    if (this.switchHandler.isSwitch(lower)) return true;
+    if (lower === 'görevler' || lower === 'gorevler' || lower === 'tasks') return true;
+    if (lower.replace(/\s+/g, ' ') === 'son dosya') return true;
+    return false;
+  }
+
+  /**
+   * Terminal etiketi ekle (AI yanıtları için)
+   */
+  addTerminalPrefix(chatId, text) {
+    const info = this.terminalHandler.getActiveLabel(chatId);
+    if (!info) return text;
+    return `[${info.key}] ${text}`;
   }
 
   async handleMessage(message) {
@@ -1092,6 +1139,26 @@ class MessageHandler {
       : body;
     this.db.logMessage(from, incomingLog, 'incoming');
 
+    // Komutları kuyruk-bypass ile anında işle
+    // Terminal tıkansa bile komutlar çalışır
+    if (!hasMedia && this.isInstantCommand(body)) {
+      try {
+        const result = await this.processOneMessage(message);
+        if (result && result !== NO_RESPONSE) {
+          await this.replyToMessage(message, result);
+          this.db.logMessage(from, result, 'outgoing');
+        }
+      } catch (e) {
+        const txt = `Hata: ${e?.message || String(e)}`;
+        try {
+          await this.replyToMessage(message, txt);
+          this.db.logMessage(from, txt, 'outgoing');
+        } catch {}
+      }
+      return;
+    }
+
+    // Normal mesajlar kuyruğa eklenir
     const queue = this.getPendingQueue(from);
     const job = this.createJob(message);
     queue.push(job);
