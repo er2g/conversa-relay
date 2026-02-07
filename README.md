@@ -1,58 +1,129 @@
-# Conversa Relay
+# WhatsApp AI Bridge
 
-Node.js service that receives WhatsApp Web messages and routes them to AI orchestrators (Codex, Claude, Gemini), with dashboard/API support and background task handling.
+WhatsApp Web üstünden mesajları alıp Codex/Claude/Gemini orkestratörlerine ileten,
+arka plan görevleri ve basit bir dashboard/API sunan Node.js uygulaması.
 
-## Features
+## Kurulum
 
-- Multi-session WhatsApp Web handling
-- Orchestrator routing (`codex`, `claude`, `gemini`)
-- Local dashboard and API endpoints
-- Background task manager for async jobs
-- Media handling with configurable limits
-
-## Requirements
-
-- Node.js 18+ (`20+` recommended for latest integrations)
-- Chromium installed (set `CHROMIUM_PATH` when needed)
-
-## Setup
+- Node.js: `>=18` (Gemini CLI için `>=20`)
+- Chromium: Linux’ta genelde `/usr/bin/chromium` (değilse `CHROMIUM_PATH` ile ayarla)
 
 ```bash
 npm install
+```
+
+## Konfigürasyon
+
+- `config/sessions.example.json` dosyasını kopyala:
+
+```bash
 cp config/sessions.example.json config/sessions.json
 ```
 
-Optional environment variables:
+İstersen şu env’leri ayarla:
 
-- `API_PORT`
-- `DATA_DIR`
-- `SESSIONS_CONFIG_PATH`
-- `DASHBOARD_USER`, `DASHBOARD_PASS`
-- `CHROMIUM_PATH`
-- `ORCHESTRATOR_TYPE`
-- `MAX_MEDIA_MB`, `MAX_IMAGE_MEDIA_MB`, `MAX_DOC_MEDIA_MB`, `MAX_AUDIO_MEDIA_MB`, `MAX_VIDEO_MEDIA_MB`
+- `API_PORT` (varsayılan `3000`)
+- `DATA_DIR` (varsayılan proje içi `./data`)
+- `SESSIONS_CONFIG_PATH` (varsayılan `./config/sessions.json`)
+- `DASHBOARD_USER` / `DASHBOARD_PASS` (dashboard basic auth)
+- `CHROMIUM_PATH` (varsayılan `/usr/bin/chromium`)
+- `ORCHESTRATOR_TYPE` (`claude`, `codex` veya `gemini`)
+- `MAX_MEDIA_MB` (genel medya limiti, varsayılan `8`)
+- `MAX_IMAGE_MEDIA_MB`, `MAX_DOC_MEDIA_MB`, `MAX_AUDIO_MEDIA_MB`, `MAX_VIDEO_MEDIA_MB`
 
-## Run
+## Çalıştırma
 
 ```bash
 npm run start
 ```
 
-Development mode:
+İlk çalıştırmada QR kod çıkar; WhatsApp’tan taratınca mesajları dinlemeye başlar.
+
+## Gemini CLI entegrasyonu
+
+Gemini CLI headless modda çağrılır; interaktif panel açılmaz.
+
+Kurulum:
 
 ```bash
-npm run dev
+sudo npm install -g @google/gemini-cli@latest
 ```
 
-## Test
+Temel ayarlar:
+
+- `GEMINI_API_KEY` (Gemini API anahtarı) veya `GOOGLE_API_KEY` + `GOOGLE_GENAI_USE_VERTEXAI=true`
+- `GEMINI_MODEL` (opsiyonel model seçimi)
+- `GEMINI_YOLO` (`1`/`0`, varsayılan `1`)
+- `GEMINI_APPROVAL_MODE` (`default`, `auto_edit`, `yolo`)
+- `GEMINI_OUTPUT_FORMAT` (varsayılan `stream-json`)
+- `GEMINI_BIN` (gemini binary yolu; varsayılan `gemini`)
+- `GEMINI_WORKDIR` (varsayılan proje dizini)
+- `GEMINI_INCLUDE_DIRS` (ek klasorler, virgülle ayrılır)
+- `GEMINI_SESSION_STORE` (session dosya yolu; varsayılan `data/gemini-sessions.json`)
+- `GEMINI_INITIAL_INSTRUCTIONS` (opsiyonel başlangıç talimatı)
+
+Gemini kullanmak için:
 
 ```bash
-npm test
+export ORCHESTRATOR_TYPE=gemini
+export GEMINI_API_KEY="YOUR_API_KEY"
+npm run start
 ```
 
-## Project Layout
+Not: Gemini CLI `@file` ile metin dosyalarını prompta dahil eder. Görseller burada yalnızca dosya yolu olarak not edilir.
 
-- `src/`: main application code
-- `config/`: runtime configuration
-- `public/`: dashboard assets
-- `test/`: test suite
+## Fotoğraf desteği
+
+WhatsApp’tan gönderilen fotoğraflar (caption’lı veya captionsız) orkestratöre görsel olarak aktarılır.
+
+## Medya indirimi (buyuk dosyalar)
+
+Buyuk dosyalarda base64 yerine direct indirme + decrypt yolu kullanilir (daha hizli ve stabil).
+Medya dosyalari `data/media/<chatId>` altina kaydedilir.
+
+Istege bagli ayarlar:
+
+- `DIRECT_MEDIA_MB` (direct indirme esigi, varsayilan `16`)
+- `DIRECT_MEDIA_FORCE=1` (tum medya dosyalarinda direct indirmeyi zorla)
+- `MEDIA_DOWNLOAD_TIMEOUT_MS` (direct indirme timeout, varsayilan `300000`)
+- `PUPPETEER_PROTOCOL_TIMEOUT_MS` (puppeteer timeout, varsayilan `600000`)
+- `WHATSAPP_MEDIA_HOST` (varsayilan `https://mmg.whatsapp.net`)
+
+## Sistem mesajlari ve AI tetikleme
+
+- Medya mesajlari AI'yi tetiklemez; dosya bilgisi sistem notu olarak kaydedilir.
+- Medya caption'i varsa "Medya notu" olarak saklanir.
+- Kullanici bir sonraki mesaj attiginda son sistem notlari prompta eklenir.
+
+## Komutlar
+
+- `gorevler` / `görevler` / `tasks`: Arka plan görevlerini listeler.
+- `son dosya`: Son kaydedilen dosya bilgisini gosterir.
+- `!!switch [claude|codex|gemini|default]`: Orkestratörü degistirir (`!!switch` = bir sonrakine gec).
+
+`!!switch` ile orkestrator degistiginde, bir sonraki mesajda tek seferlik sohbet ozeti sistem notu olarak eklenir.
+Opsiyonel ayarlar:
+
+- `HANDOFF_CONTEXT_LIMIT` (varsayilan `12`)
+- `HANDOFF_CONTEXT_LINE_CHARS` (varsayilan `240`)
+- `HANDOFF_CONTEXT_MAX_CHARS` (varsayilan `2000`)
+
+## Arka plan görevleri (bg-task)
+
+AI arka plan görevi baslatirken `bg-task` JSON'unda `orchestrator` alanini seçer:
+
+```json
+{"title":"...","steps":["..."],"prompt":"...","orchestrator":"codex|claude|gemini"}
+```
+
+Varsayilan fallback sirasiyla: `BG_ORCHESTRATOR` → `BACKGROUND_ORCHESTRATOR` → `ORCHESTRATOR_TYPE` → `codex`.
+
+Arka plan ayarlari (opsiyonel):
+
+- `CODEX_BG_INSTRUCTIONS`, `CODEX_BG_TIMEOUT_MS`
+- `CLAUDE_BG_INSTRUCTIONS`, `CLAUDE_BG_MODEL`, `CLAUDE_BG_TIMEOUT_MS`
+- `GEMINI_BG_INSTRUCTIONS`, `GEMINI_BG_MODEL`, `GEMINI_BG_OUTPUT_FORMAT`, `GEMINI_BG_APPROVAL_MODE`, `GEMINI_BG_YOLO`, `GEMINI_BG_TIMEOUT_MS`
+
+## Güvenlik notu
+
+`data/` ve `config/sessions.json` Git’e alınmaz (session/numara/DB/log içerir). Repo’ya sadece örnek config eklenir.
