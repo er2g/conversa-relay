@@ -1,5 +1,5 @@
 import pkg from 'whatsapp-web.js';
-const { Client, LocalAuth } = pkg;
+const { Client, LocalAuth, MessageMedia } = pkg;
 import qrcode from 'qrcode-terminal';
 import logger from '../logger.js';
 import EventEmitter from 'events';
@@ -119,6 +119,23 @@ class WhatsAppClient extends EventEmitter {
       return result;
     } catch (error) {
       logger.error('Mesaj gönderme hatası:', error);
+      throw error;
+    }
+  }
+
+  async sendMediaMessage(chatId, filePath, caption = '') {
+    if (!this.isReady) {
+      throw new Error('WhatsApp bağlantısı hazır değil');
+    }
+
+    try {
+      const media = MessageMedia.fromFilePath(filePath);
+      const options = caption ? { caption } : {};
+      const result = await this.client.sendMessage(chatId, media, options);
+      logger.info(`Medya gönderildi: ${chatId} - ${filePath}`);
+      return result;
+    } catch (error) {
+      logger.error('Medya gönderme hatası:', error);
       throw error;
     }
   }

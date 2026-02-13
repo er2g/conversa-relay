@@ -48,7 +48,9 @@ async function main() {
     process.exit(0);
   }
 
-  const textValue = flags.text || flags.message || positional.join(' ').trim();
+  const textValue = (flags.text || flags.message || positional.join(' ').trim())
+    .replace(/\\n/g, '\n')
+    .replace(/\\t/g, '\t');
   if (!textValue) {
     console.error('Hata: Mesaj metni gerekli (--text).');
     printUsage();

@@ -846,6 +846,26 @@ class MessageHandler {
     return summary;
   }
 
+  /**
+   * Claude execution sırasında outbox'a mesaj atılıp atılmadığını kontrol et
+   * Atıldıysa response text'i susutur (çift mesaj önleme)
+   */
+  async hasOutboxActivity(requestId) {
+    if (!requestId) return false;
+    const token = String(requestId).replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 24);
+    if (!token || token === 'noreq') return false;
+
+    for (const dir of [this.outboxPaths.pendingDir, this.outboxPaths.processedDir]) {
+      try {
+        const files = await fs.promises.readdir(dir);
+        if (files.some(f => f.includes(token))) return true;
+      } catch {
+        // dizin henüz yok olabilir
+      }
+    }
+    return false;
+  }
+
   async processOneMessage(message) {
     const from = message.from;
     this.setAiExecutionMeta(from, null);
@@ -991,11 +1011,12 @@ class MessageHandler {
         }
       }
 
+      // Sadece caption varsa AI'a ilet, captionsuz medyalar tetiklemesin
       const trimmedBody = String(body || '').trim();
-      if (trimmedBody) {
-        this.addSystemNote(from, `Medya notu: ${trimmedBody}`);
+      if (!trimmedBody) {
+        return NO_RESPONSE;
       }
-      return NO_RESPONSE;
+      // Fall through: caption ile AI işlemine devam et (medya zaten indirildi)
     }
 
     // Temel prompt
@@ -1043,14 +1064,20 @@ class MessageHandler {
     // Terminal session state'ini otomatik kaydet
     this.terminalHandler.autoSave(from).catch(() => {});
 
-    // Normal yanıt - task plan marker'ını temizle
+    // Claude outbox'a kendi mesajlarını atmışsa response text'i susutur (çift mesaj önleme)
+    const reqId = session?.lastExecutionMeta?.requestId;
+    if (reqId && await this.hasOutboxActivity(reqId)) {
+      logger.info(`Claude outbox mesajı gönderdi (${reqId.substring(0, 16)}...), response text susturuluyor`);
+      return NO_RESPONSE;
+    }
+
+    // Fallback: Claude outbox kullanmadıysa response text'i gönder
     const cleaned = this.cleanResponse(response);
     if (cleaned && cleaned.trim()) {
       return cleaned;
     }
 
     // Eğer yanıt sadece bg-task bloğundan ibaretse cleanResponse() sonucu boş kalabilir.
-    // Bu durumda kullanıcıya anlamlı bir fallback dön.
     if (taskPlan) {
       const maxTasks = parseInt(process.env.MAX_BG_TASKS_PER_USER || '3', 10);
       const activeCount = taskManager.getActiveTaskCount(from);

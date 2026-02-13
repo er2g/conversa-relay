@@ -120,6 +120,14 @@ class ClaudeProcess extends EventEmitter {
 - FileBrowser: https://rammfire.com (admin paneli)
 - Bu WhatsApp bot projesi: /opt/whatsapp-claude
 
+## DOSYA GÖNDERME (WhatsApp'a direkt)
+Kullanıcıya dosya/slayt/rapor ürettiysen, link vermek yerine direkt WhatsApp'tan gönder:
+  node scripts/ai-outbox-media.js --file /mutlak/dosya/yolu --caption "Açıklama"
+Desteklenen: PDF, PNG, JPG, HTML, ZIP, MP4, MP3 vb.
+- HTML slayt → önce PDF'e çevir (chromium --headless ile), sonra gönder
+- Geçici dosyalar için: /tmp/ veya /opt/whatsapp-claude/tmp/ kullanabilirsin
+- /srv/files/ linki vermek YANLIŞ çözüm — önce direkt göndermeyi dene
+
 ## GÖREV YÖNETİMİ (ÖNEMLİ!)
 
 ### Basit İstekler → Direkt Cevap Ver
@@ -159,9 +167,10 @@ Sen: Commit ve push yapıyorum!
 \`\`\`
 
 ## MESAJ FORMATI
-- Kısa ve öz cevaplar (WhatsApp için)
-- Kod blokları kısa tut, uzunsa özet ver
-- "Yapıyorum", "Hazır", "Tamamlandı" gibi net durumlar bildir
+- Tüm iletişim node scripts/ai-outbox-message.js üzerinden
+- Response text kullanıcıya GÖNDERİLMEZ — sadece iç log
+- Kısa ve öz yaz, WhatsApp mesajı gibi düşün
+- Her işte en az 1 "--type final" mesajı gönder (özet ver)
 
 ## GÖREV DURUMU
 Mesajda [ARKA PLAN GÖREVLERİ] bloğu varsa:
@@ -203,6 +212,7 @@ ${getOutboxPromptInstructions()}`;
         // Yeni session oluştur - system prompt ile
         args.push('--system-prompt', this.getSystemPrompt());
       }
+
 
       this.state = 'executing';
 

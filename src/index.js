@@ -88,8 +88,12 @@ class WhatsAppCodexApp {
 
       this.outboxDispatcher = new OutboxDispatcher({
         outboxPaths,
-        sendMessage: async (chatId, text) => {
-          await this.messageHandler.sendTextToChat(chatId, text);
+        sendMessage: async (chatId, text, envelope) => {
+          if (envelope?.filePath) {
+            await this.waClient.sendMediaMessage(chatId, envelope.filePath, text || '');
+          } else {
+            await this.messageHandler.sendTextToChat(chatId, text);
+          }
         },
         onDelivered: async (payload) => {
           this.db.logMessage(payload.chatId, payload.text, 'outgoing');

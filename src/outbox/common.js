@@ -6,7 +6,7 @@ import { paths } from '../paths.js';
 const DEFAULT_BASE_DIR = process.env.AI_OUTBOX_DIR || path.join(paths.dataDir, 'ai-outbox');
 const DEFAULT_VERSION = 1;
 const MAX_TEXT_LENGTH = 12000;
-const VALID_TYPES = new Set(['start', 'progress', 'final', 'error', 'info']);
+const VALID_TYPES = new Set(['start', 'progress', 'final', 'error', 'info', 'media']);
 let writeSequence = 0;
 
 function sanitizeToken(value, maxLen = 48) {
@@ -70,13 +70,20 @@ export function normalizeOutboxMessage(payload = {}, options = {}) {
     throw new Error('chatId zorunlu');
   }
 
+  const type = normalizeOutboxType(payload.type);
+  const filePath = payload.filePath ? String(payload.filePath).trim() : null;
+
   const rawText = payload.text ?? payload.message ?? payload.content;
   const text = String(rawText || '').trim();
-  if (!text) {
+  // Media mesajlarında text (caption) opsiyoneldir
+  if (!text && type !== 'media') {
     throw new Error('text zorunlu');
   }
   if (text.length > MAX_TEXT_LENGTH) {
     throw new Error(`text cok uzun (${text.length} > ${MAX_TEXT_LENGTH})`);
+  }
+  if (type === 'media' && !filePath) {
+    throw new Error('media mesajinda filePath zorunlu');
   }
 
   const createdAtRaw = payload.createdAt || payload.created_at;
@@ -85,7 +92,6 @@ export function normalizeOutboxMessage(payload = {}, options = {}) {
 
   const requestId = String((payload.requestId ?? payload.request_id ?? fallbackRequestId) || '').trim() || null;
   const orchestrator = String((payload.orchestrator ?? fallbackOrchestrator) || '').trim() || 'unknown';
-  const type = normalizeOutboxType(payload.type);
 
   const normalized = {
     version: Number(payload.version || DEFAULT_VERSION) || DEFAULT_VERSION,
@@ -97,6 +103,10 @@ export function normalizeOutboxMessage(payload = {}, options = {}) {
     type,
     text
   };
+
+  if (filePath) {
+    normalized.filePath = filePath;
+  }
 
   const meta = compactMeta(payload.meta);
   if (meta) {
@@ -155,22 +165,34 @@ export function buildOutboxEnv({
 export function getOutboxPromptInstructions() {
   return [
     '## CANLI WHATSAPP MESAJ AKISI',
-    'Kullaniciyla dogal, samimi ve net bir dille konus.',
-    'Kullanici mesaji gelir gelmez, gerekliyse kisa bir ilk donut ver; sohbette senden geri bildirim beklendigini unutma.',
-    'Surec birkac adimdan olusuyorsa JSON outbox ile kisa durum mesajlari paylas.',
+    'TUM iletisim (basit cevaplar dahil) node scripts/ai-outbox-message.js komutuyla yapilir.',
+    'Response text kullaniciya GONDERILMEZ - sadece sistem tarafindan loglanir.',
+    '',
     'Komut: node scripts/ai-outbox-message.js --type start|progress|final|error --text "mesaj"',
     'Bu komut WA_OUTBOX_DIR/WA_CHAT_ID/WA_REQUEST_ID env degiskenlerini otomatik kullanir.',
-    'Ipucu: Is 2-3 saniyeden uzun surecek gibiyse genelde once 1 kisa "basladim" mesaji gondermek iyi olur.',
-    'Ornek:',
-    '- node scripts/ai-outbox-message.js --type start --text "Tamam, bakiyorum."',
-    '- node scripts/ai-outbox-message.js --type progress --text "Bulduklarimi toparliyorum."',
-    '- node scripts/ai-outbox-message.js --type final --text "Hazir, paylasiyorum."',
-    'Kisa rehber:',
-    '- Varsayilan davranis: ise baslarken kisa bir baslangic mesaji at.',
-    '- Onemli adimlarda 1-2 kisa guncelleme paylas.',
-    '- Eger istek tek adimlik ve aninda bitecekse tek final mesaji da kabul edilir.',
-    '- Biterken sonucu tek mesajda toparla.',
-    'Mini tavsiye 1: Gereksiz teknik detaya bogma.',
-    'Mini tavsiye 2: Her guncellemede yeni bilgi ver, tekrar etme.'
+    '',
+    'Mesaj tipleri:',
+    '  start    - Ise baslarken (2+ saniye surecek islerde)',
+    '  progress - Ara guncelleme',
+    '  final    - Son mesaj (her zaman gonder, ozet ver)',
+    '  error    - Hata durumu',
+    '',
+    'Basit soru icin:',
+    '  node scripts/ai-outbox-message.js --type final --text "4"',
+    '',
+    'Uzun is icin:',
+    '  node scripts/ai-outbox-message.js --type start --text "Bakiyorum."',
+    '  node scripts/ai-outbox-message.js --type progress --text "Dosyayi yaziyorum."',
+    '  node scripts/ai-outbox-message.js --type final --text "Hazir! Dosya gonderildi."',
+    '',
+    'DOSYA GONDERME (WhatsApp\'a direkt):',
+    '  node scripts/ai-outbox-media.js --file /mutlak/dosya/yolu --caption "Aciklama"',
+    'Desteklenen: PDF, PNG, JPG, HTML, ZIP, MP4, MP3 vb.',
+    'Her zaman link vermek yerine bunu kullan.',
+    '',
+    'Kurallar:',
+    '- Her zaman en az 1 final mesaji gonder.',
+    '- Her guncellemede yeni bilgi ver, tekrar etme.',
+    '- Kisa ve oz yaz, teknik detaya bogma.'
   ].join('\n');
 }
