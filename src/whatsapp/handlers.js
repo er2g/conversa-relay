@@ -18,6 +18,7 @@ import {
 } from './media-download.js';
 import {
   getOutboxPaths,
+  getOutboxPromptInstructions,
   writeOutboxMessage
 } from '../outbox/common.js';
 
@@ -1023,7 +1024,8 @@ class MessageHandler {
     const messageTimestamp = this.formatMessageTimestampForPrompt(message);
     const timestampBlock = `\n\n[MESAJ ZAMANI]\n${messageTimestamp}\n[/MESAJ ZAMANI]\n`;
     const feedbackExpectationBlock = this.buildFeedbackExpectationBlock();
-    const prompt = `${basePrompt}${timestampBlock}${feedbackExpectationBlock}${systemBlock}${taskSummary || ''}`;
+    const outboxInstructions = `\n\n${getOutboxPromptInstructions()}\n`;
+    const prompt = `${basePrompt}${timestampBlock}${feedbackExpectationBlock}${systemBlock}${taskSummary || ''}${outboxInstructions}`;
 
     const response = await session.execute(prompt, { images });
     this.setAiExecutionMeta(from, session?.lastExecutionMeta || null);

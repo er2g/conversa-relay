@@ -114,7 +114,7 @@ class CodexProcess extends EventEmitter {
   }
 
   getPrimaryModel() {
-    return process.env.CODEX_MODEL || '5.3-codex';
+    return process.env.CODEX_MODEL || 'gpt-5.3-codex';
   }
 
   async runCodex({ mode, message, images = [], requestId = null, modelOverride = null }) {

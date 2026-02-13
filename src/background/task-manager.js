@@ -118,7 +118,7 @@ class BackgroundTaskManager extends EventEmitter {
   }
 
   getPrimaryCodexModel() {
-    return process.env.CODEX_MODEL || '5.3-codex';
+    return process.env.CODEX_MODEL || 'gpt-5.3-codex';
   }
 
   /**
