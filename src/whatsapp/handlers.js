@@ -16,6 +16,10 @@ import {
   normalizeMediaKey,
   resolveMediaKeyType
 } from './media-download.js';
+import {
+  getOutboxPaths,
+  writeOutboxMessage
+} from '../outbox/common.js';
 
 const configPath = process.env.SESSIONS_CONFIG_PATH || path.join(paths.configDir, 'sessions.json');
 const NO_RESPONSE = Symbol('no-response');
@@ -31,6 +35,8 @@ class MessageHandler {
     this.pendingJobs = new Map(); // chatId -> Job[]
     this.lastSavedFileByChat = new Map(); // chatId -> last file info
     this.systemNotesByChat = new Map(); // chatId -> string[]
+    this.aiExecutionMetaByChat = new Map(); // chatId -> execution meta
+    this.outboxPaths = getOutboxPaths();
 
     // Yeni switch handler - addSystemNote callback'i ile
     this.switchHandler = new SwitchHandler(sessionManager, db, {
@@ -325,6 +331,56 @@ class MessageHandler {
     if (!notes || notes.length === 0) return '';
     const lines = notes.map((note) => `- ${note}`);
     return `\n\n[SISTEM MESAJLARI]\n${lines.join('\n')}\n[/SISTEM MESAJLARI]\n`;
+  }
+
+  buildFeedbackExpectationBlock() {
+    return (
+      '\n\n[ILETISIM BEKLENTISI]\n' +
+      'Kullanici bu andan itibaren senden surec boyunca kisa ve net donutler bekleyebilir.\n' +
+      '- Is tek adimlik degilse kisa bir baslangic mesajiyla ise girdigini belirt.\n' +
+      '- Isin kritik adimlarinda fazla uzatmadan kisa guncelleme ver.\n' +
+      '- Is biter bitmez sonucu toparlayip final mesaji ver.\n' +
+      '[/ILETISIM BEKLENTISI]\n'
+    );
+  }
+
+  setAiExecutionMeta(chatId, meta) {
+    if (!chatId) return;
+    if (!meta || typeof meta !== 'object') {
+      this.aiExecutionMetaByChat.delete(chatId);
+      return;
+    }
+    this.aiExecutionMetaByChat.set(chatId, {
+      requestId: meta.requestId || null,
+      orchestrator: meta.orchestrator || null,
+      sessionId: meta.sessionId || null
+    });
+  }
+
+  consumeAiExecutionMeta(chatId) {
+    if (!chatId) return null;
+    const meta = this.aiExecutionMetaByChat.get(chatId) || null;
+    this.aiExecutionMetaByChat.delete(chatId);
+    return meta;
+  }
+
+  async queueOutboxMessage(chatId, text, options = {}) {
+    return await writeOutboxMessage(
+      {
+        chatId,
+        requestId: options.requestId || null,
+        orchestrator: options.orchestrator || null,
+        type: options.type || 'progress',
+        text,
+        meta: options.meta || undefined
+      },
+      {
+        outboxPaths: this.outboxPaths,
+        fallbackChatId: chatId,
+        fallbackRequestId: options.requestId || null,
+        fallbackOrchestrator: options.orchestrator || null
+      }
+    );
   }
 
   getDirectDownloadThresholdBytes() {
@@ -647,8 +703,8 @@ class MessageHandler {
       images,
       orchestrator: selectedOrchestrator,
       onComplete: async (completedTask) => {
+        let resultText = `ℹ️ Görev durumu: ${completedTask.status}`;
         try {
-          let resultText;
           if (completedTask.status === 'completed') {
             resultText = `✅ *Görev tamamlandı: ${completedTask.description}*\n\n` +
               `${completedTask.result}`;
@@ -661,11 +717,26 @@ class MessageHandler {
             resultText = `ℹ️ Görev durumu: ${completedTask.status}`;
           }
 
-          await this.replyToMessage(message, resultText);
-          this.db.logMessage(from, resultText, 'outgoing');
+          const requestId = completedTask.requestId || `bg-${completedTask.id}`;
+          await this.queueOutboxMessage(from, resultText, {
+            type: completedTask.status === 'failed' || completedTask.status === 'timeout' ? 'error' : 'final',
+            requestId,
+            orchestrator: completedTask.orchestrator || null,
+            meta: {
+              taskId: completedTask.id,
+              taskStatus: completedTask.status
+            }
+          });
           this.addSystemNote(from, resultText);
         } catch (e) {
           logger.error('Görev sonucu gönderme hatası:', e);
+          try {
+            const fallback = e?.message ? `${resultText}\n\n(Not: outbox kuyruga yazilamadi: ${e.message})` : resultText;
+            await this.sendTextToChat(from, fallback);
+            this.db.logMessage(from, fallback, 'outgoing');
+          } catch (sendErr) {
+            logger.error('Görev sonucu fallback gonderilemedi:', sendErr);
+          }
         }
       }
     });
@@ -776,6 +847,7 @@ class MessageHandler {
 
   async processOneMessage(message) {
     const from = message.from;
+    this.setAiExecutionMeta(from, null);
     let body = message.body || '';
     const hasMedia = message.hasMedia === true;
 
@@ -950,9 +1022,11 @@ class MessageHandler {
     const taskSummary = this.getActiveTasksSummary(from);
     const messageTimestamp = this.formatMessageTimestampForPrompt(message);
     const timestampBlock = `\n\n[MESAJ ZAMANI]\n${messageTimestamp}\n[/MESAJ ZAMANI]\n`;
-    const prompt = `${basePrompt}${timestampBlock}${systemBlock}${taskSummary || ''}`;
+    const feedbackExpectationBlock = this.buildFeedbackExpectationBlock();
+    const prompt = `${basePrompt}${timestampBlock}${feedbackExpectationBlock}${systemBlock}${taskSummary || ''}`;
 
     const response = await session.execute(prompt, { images });
+    this.setAiExecutionMeta(from, session?.lastExecutionMeta || null);
 
     // AI'ın arka plan görevi planı var mı kontrol et
     const taskPlan = this.parseBackgroundTaskPlan(response);
@@ -968,7 +1042,27 @@ class MessageHandler {
     this.terminalHandler.autoSave(from).catch(() => {});
 
     // Normal yanıt - task plan marker'ını temizle
-    return this.cleanResponse(response);
+    const cleaned = this.cleanResponse(response);
+    if (cleaned && cleaned.trim()) {
+      return cleaned;
+    }
+
+    // Eğer yanıt sadece bg-task bloğundan ibaretse cleanResponse() sonucu boş kalabilir.
+    // Bu durumda kullanıcıya anlamlı bir fallback dön.
+    if (taskPlan) {
+      const maxTasks = parseInt(process.env.MAX_BG_TASKS_PER_USER || '3', 10);
+      const activeCount = taskManager.getActiveTaskCount(from);
+      if (activeCount >= maxTasks) {
+        return (
+          `Şu an en fazla ${maxTasks} arka plan görevi aynı anda çalışabiliyor. ` +
+          `Mevcut görevleri görmek için "görevler" yazabilirsin; istersen birini iptal etmene de yardım edeyim.`
+        );
+      }
+      return 'Arka plan görev planını aldım ama yanıt metni boş geldi. İstersen sorunu 1 cümleyle tekrar yazar mısın?';
+    }
+
+    logger.warn('AI yanıtı boş/temizlenince boş kaldı');
+    return 'Cevabım boş geldi. Tekrar dener misin? İstersen `!!switch` ile farklı bir orkestratör deneyebilirsin.';
   }
 
   /**
@@ -1014,8 +1108,8 @@ class MessageHandler {
    * Yanıttan bg-task bloğunu temizle
    */
   cleanResponse(response) {
-    if (!response) return response;
-    return response.replace(/```bg-task\s*\n[\s\S]*?\n```/g, '').trim();
+    if (response === null || response === undefined) return response;
+    return String(response).replace(/```bg-task\s*\n[\s\S]*?\n```/g, '').trim();
   }
 
   async runQueue(chatId) {
@@ -1028,11 +1122,29 @@ class MessageHandler {
 
         try {
           const result = await this.processOneMessage(job.message);
+          const executionMeta = this.consumeAiExecutionMeta(chatId);
           if (result === NO_RESPONSE) {
             continue;
           }
-          if (!result) {
-            const txt = 'Hata: Yanıt boş döndü.';
+          // Bazı edge-case'lerde AI boş string döndürebilir (veya yanıt temizlenince boş kalabilir).
+          // Bu durumda generic hata yerine anlamlı bir mesaj dön.
+          if (typeof result === 'string' && result.trim() === '') {
+            const txt =
+              'Cevabım boş geldi (muhtemelen bağlantı/timeout ya da yalnızca bir plan bloğu döndü). ' +
+              'Tekrar dener misin? İstersen `!!switch` ile farklı bir orkestratör de deneyebilirsin.';
+            try {
+              await this.replyToMessage(job.message, txt);
+              this.db.logMessage(chatId, txt, 'outgoing');
+              this.addSystemNote(chatId, txt);
+            } catch (sendError) {
+              logger.error('Hata mesajı gönderilemedi:', sendError?.message || String(sendError));
+            }
+            continue;
+          }
+          if (result === null || result === undefined) {
+            const txt =
+              'Cevap alamadım (bağlantı/timeout veya orkestratör tarafında bir aksilik olmuş olabilir). ' +
+              'Bir kez daha yazar mısın? İstersen `!!switch` ile farklı bir orkestratör de deneyebiliriz.';
             try {
               await this.replyToMessage(job.message, txt);
               this.db.logMessage(chatId, txt, 'outgoing');
@@ -1045,40 +1157,52 @@ class MessageHandler {
 
           // AI yanıtına terminal etiketi ekle
           const tagged = this.addTerminalPrefix(chatId, result);
+          const chunks = tagged.length > 4000 ? this.splitMessage(tagged, 4000) : [tagged];
 
-          if (tagged.length > 4000) {
-            const chunks = this.splitMessage(tagged, 4000);
-            for (let i = 0; i < chunks.length; i++) {
-              try {
-                await this.replyToMessage(job.message, chunks[i]);
-                this.db.logMessage(chatId, chunks[i], 'outgoing');
-              } catch (sendError) {
-                logger.error('Mesaj chunk gönderilemedi:', sendError?.message || String(sendError));
-                break;
-              }
-              if (i < chunks.length - 1) {
-                await this.sleep(500);
-              }
-            }
-          } else {
+          if (executionMeta?.requestId) {
             try {
-              await this.replyToMessage(job.message, tagged);
-              this.db.logMessage(chatId, tagged, 'outgoing');
+              for (let i = 0; i < chunks.length; i++) {
+                await this.queueOutboxMessage(chatId, chunks[i], {
+                  type: i === chunks.length - 1 ? 'final' : 'progress',
+                  requestId: executionMeta.requestId,
+                  orchestrator: executionMeta.orchestrator || null,
+                  meta: {
+                    sessionId: executionMeta.sessionId || null,
+                    chunkIndex: i + 1,
+                    chunkCount: chunks.length
+                  }
+                });
+              }
+              continue;
+            } catch (outboxError) {
+              logger.error('AI yaniti outboxa yazilamadi:', outboxError?.message || String(outboxError));
+            }
+          }
+
+          for (let i = 0; i < chunks.length; i++) {
+            try {
+              await this.replyToMessage(job.message, chunks[i]);
+              this.db.logMessage(chatId, chunks[i], 'outgoing');
             } catch (sendError) {
-              logger.error('Mesaj gönderilemedi:', sendError?.message || String(sendError));
+              logger.error('Mesaj chunk gönderilemedi:', sendError?.message || String(sendError));
+              break;
+            }
+            if (i < chunks.length - 1) {
+              await this.sleep(500);
             }
           }
         } catch (e) {
+          this.consumeAiExecutionMeta(chatId);
           const errorMsg = e?.message || String(e);
           const txt = `Hata: ${errorMsg}`;
-            try {
-              await this.replyToMessage(job.message, txt);
-              this.db.logMessage(chatId, txt, 'outgoing');
-              this.addSystemNote(chatId, txt);
-            } catch (sendError) {
-              logger.error('Hata mesajı gönderilemedi:', sendError?.message || String(sendError));
-            }
+          try {
+            await this.replyToMessage(job.message, txt);
+            this.db.logMessage(chatId, txt, 'outgoing');
+            this.addSystemNote(chatId, txt);
+          } catch (sendError) {
+            logger.error('Hata mesajı gönderilemedi:', sendError?.message || String(sendError));
           }
+        }
       }
     } finally {
       this.processingQueue.set(chatId, false);
@@ -1178,8 +1302,7 @@ class MessageHandler {
    * Mesaj gönderme - retry mekanizması ile
    * Frame detached hatalarında yeniden dener
    */
-  async replyToMessage(originalMessage, text, maxRetries = 3) {
-    const chatId = originalMessage.from;
+  async sendTextToChat(chatId, text, maxRetries = 3) {
     let lastError = null;
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
@@ -1281,6 +1404,11 @@ class MessageHandler {
     }
 
     throw lastError || new Error('Mesaj gönderilemedi (maksimum deneme aşıldı)');
+  }
+
+  async replyToMessage(originalMessage, text, maxRetries = 3) {
+    const chatId = originalMessage.from;
+    return await this.sendTextToChat(chatId, text, maxRetries);
   }
 
   splitMessage(text, maxLength) {

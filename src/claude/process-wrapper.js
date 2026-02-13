@@ -4,6 +4,12 @@ import fs from 'fs/promises';
 import logger from '../logger.js';
 import path from 'path';
 import { paths } from '../paths.js';
+import {
+  buildOutboxEnv,
+  createOutboxRequestId,
+  getOutboxPaths,
+  getOutboxPromptInstructions
+} from '../outbox/common.js';
 
 class CodexProcess extends EventEmitter {
   constructor(id, owner) {
@@ -18,6 +24,8 @@ class CodexProcess extends EventEmitter {
     this.threadId = null;
     this.threadLoaded = false;
     this.threadPrimed = false;
+    this.lastExecutionMeta = null;
+    this.outboxPaths = getOutboxPaths();
   }
 
   getThreadStorePath() {
@@ -105,7 +113,7 @@ class CodexProcess extends EventEmitter {
     return u.length >= 6;
   }
 
-  async runCodex({ mode, message, images = [] }) {
+  async runCodex({ mode, message, images = [], requestId = null }) {
     const model = process.env.CODEX_MODEL || 'gpt-5.2';
     const reasoningEffort = process.env.CODEX_REASONING_EFFORT || 'high';
     const workdir = process.env.CODEX_WORKDIR || paths.appRoot;
@@ -125,7 +133,9 @@ class CodexProcess extends EventEmitter {
         '{"title": "Başlık", "steps": ["Adım 1", "Adım 2"], "prompt": "Detaylı talimat", "orchestrator": "codex|claude|gemini"}',
         '```',
         'Bu blok sisteme gönderilecek ve ayrı bir worker işi yapacak. Sen sadece bloğu yaz, işi yapma.',
-        '[ARKA PLAN GÖREVLERİ] bloğu varsa bunları kullanıcıya aynen gösterme, özetle.'
+        '[ARKA PLAN GÖREVLERİ] bloğu varsa bunları kullanıcıya aynen gösterme, özetle.',
+        '',
+        getOutboxPromptInstructions()
       ].join('\n');
 
     return await new Promise((resolve) => {
@@ -177,7 +187,16 @@ class CodexProcess extends EventEmitter {
 
       this.process = spawn(codexBin, args, {
         env: {
-          ...process.env
+          ...process.env,
+          ...buildOutboxEnv({
+            chatId: this.owner,
+            requestId,
+            orchestrator: 'codex',
+            outboxPaths: this.outboxPaths,
+            extraEnv: {
+              WA_SESSION_ID: this.id
+            }
+          })
         },
         cwd: workdir
       });
@@ -185,7 +204,25 @@ class CodexProcess extends EventEmitter {
       let stderr = '';
       let threadIdFromRun = null;
       const messages = [];
+      const commandOutputs = [];
       let stdoutBuf = '';
+
+      const processEvent = (evt) => {
+        if (!evt) return;
+        if (evt.type === 'thread.started' && typeof evt.thread_id === 'string') {
+          threadIdFromRun = evt.thread_id;
+        }
+        if (evt.type === 'item.completed' && evt.item?.type === 'agent_message') {
+          const text = String(evt.item.text || '').trim();
+          if (text) messages.push(text);
+        }
+        // Tool call çıktılarını da yakala (agent_message yoksa fallback olarak kullanılacak)
+        if (evt.type === 'item.completed' && evt.item?.type === 'command_execution') {
+          const output = String(evt.item.aggregated_output || '').trim();
+          const cmd = String(evt.item.command || '').trim();
+          if (cmd) commandOutputs.push({ cmd, output, exitCode: evt.item.exit_code });
+        }
+      };
 
       this.process.stdout.on('data', (data) => {
         stdoutBuf += data.toString();
@@ -197,14 +234,7 @@ class CodexProcess extends EventEmitter {
           const trimmed = line.trim();
           if (!trimmed.startsWith('{')) continue;
           try {
-            const evt = JSON.parse(trimmed);
-            if (evt?.type === 'thread.started' && typeof evt.thread_id === 'string') {
-              threadIdFromRun = evt.thread_id;
-            }
-            if (evt?.type === 'item.completed' && evt?.item?.type === 'agent_message') {
-              const text = String(evt.item.text || '').trim();
-              if (text) messages.push(text);
-            }
+            processEvent(JSON.parse(trimmed));
           } catch {
             // ignore non-JSON lines
           }
@@ -223,14 +253,7 @@ class CodexProcess extends EventEmitter {
         const tail = stdoutBuf.trim();
         if (tail.startsWith('{')) {
           try {
-            const evt = JSON.parse(tail);
-            if (evt?.type === 'thread.started' && typeof evt.thread_id === 'string') {
-              threadIdFromRun = evt.thread_id;
-            }
-            if (evt?.type === 'item.completed' && evt?.item?.type === 'agent_message') {
-              const text = String(evt.item.text || '').trim();
-              if (text) messages.push(text);
-            }
+            processEvent(JSON.parse(tail));
           } catch {
             // ignore
           }
@@ -250,6 +273,17 @@ class CodexProcess extends EventEmitter {
         if (code === 0) {
           const result = messages.join('\n').trim();
           if (!result) {
+            // agent_message yoksa tool call çıktılarından özet oluştur
+            if (commandOutputs.length > 0) {
+              const summary = commandOutputs.map(c => {
+                const status = c.exitCode === 0 ? '✓' : `✗ (${c.exitCode})`;
+                const out = c.output ? `\n${c.output.substring(0, 500)}` : '';
+                return `${status} \`${c.cmd.substring(0, 100)}\`${out}`;
+              }).join('\n\n');
+              resolve(summary.substring(0, 3500));
+              return;
+            }
+            logger.warn('Codex yanıt boş (agent_message yok, tool call yok)');
             resolve('');
             return;
           }
@@ -312,7 +346,7 @@ class CodexProcess extends EventEmitter {
         'Bu mesaja sadece \"OK\" yaz.'
       ].join('\n');
 
-    await this.runCodex({ mode: 'resume', message: primer });
+    await this.runCodex({ mode: 'resume', message: primer, requestId: this.lastExecutionMeta?.requestId || null });
     this.threadPrimed = true;
     await this.saveThreadState({ threadId: this.threadId, primed: true });
   }
@@ -333,6 +367,12 @@ class CodexProcess extends EventEmitter {
     this.lastActivity = new Date();
     this.state = 'executing';
     this.messageCount++;
+    const requestId = createOutboxRequestId('chat');
+    this.lastExecutionMeta = {
+      requestId,
+      orchestrator: 'codex',
+      sessionId: this.id
+    };
 
     await this.loadThreadState();
 
@@ -342,21 +382,22 @@ class CodexProcess extends EventEmitter {
 
     if (this.threadId) {
       await this.ensureThreadPrimed();
-      let response = await this.runCodex({ mode: 'resume', message, images });
+      let response = await this.runCodex({ mode: 'resume', message, images, requestId });
 
       if (this.shouldRetry(message, response)) {
         response = await this.runCodex({
           mode: 'resume',
           message:
             `Önceki cevabın çok kısa/boş. Lütfen kullanıcı mesajına kısa ama açıklayıcı cevap ver; sadece \"Tamam\" yazma.\n\nKullanıcı mesajı: ${message}`,
-          images
+          images,
+          requestId
         });
       }
 
       return response;
     }
 
-    return await this.runCodex({ mode: 'new', message, images });
+    return await this.runCodex({ mode: 'new', message, images, requestId });
   }
 
   getStatus() {

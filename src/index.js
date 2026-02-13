@@ -8,6 +8,8 @@ import fs from 'fs';
 import path from 'path';
 import { paths } from './paths.js';
 import { taskManager } from './background/task-manager.js';
+import OutboxDispatcher from './outbox/dispatcher.js';
+import { ensureOutboxDirs, getOutboxPaths } from './outbox/common.js';
 
 const API_PORT = process.env.API_PORT || 3000;
 const MAX_SESSIONS = parseInt(process.env.MAX_SESSIONS) || 3;
@@ -27,6 +29,7 @@ class WhatsAppCodexApp {
     this.sessionManager = null;
     this.messageHandler = null;
     this.apiServer = null;
+    this.outboxDispatcher = null;
     this.isShuttingDown = false;
   }
 
@@ -51,6 +54,9 @@ class WhatsAppCodexApp {
       // Session manager
       logger.info('Oturum yöneticisi başlatılıyor...');
       this.sessionManager = new SessionManager(this.db, MAX_SESSIONS, SESSION_TIMEOUT);
+
+      const outboxPaths = getOutboxPaths();
+      await ensureOutboxDirs(outboxPaths);
 
       // WhatsApp client
       logger.info('WhatsApp client başlatılıyor...');
@@ -79,6 +85,23 @@ class WhatsAppCodexApp {
       // Servisleri başlat
       await this.apiServer.start();
       await this.waClient.initialize();
+
+      this.outboxDispatcher = new OutboxDispatcher({
+        outboxPaths,
+        sendMessage: async (chatId, text) => {
+          await this.messageHandler.sendTextToChat(chatId, text);
+        },
+        onDelivered: async (payload) => {
+          this.db.logMessage(payload.chatId, payload.text, 'outgoing');
+          this.apiServer.broadcastMessage(payload.chatId, payload.text, 'outgoing');
+        },
+        onFailed: async (failed) => {
+          logger.error(
+            `Outbox mesaji gonderilemedi [${failed.reason}]: ${failed.error}`
+          );
+        }
+      });
+      await this.outboxDispatcher.start();
 
       logger.info('='.repeat(50));
       logger.info('Sistem hazır!');
@@ -155,6 +178,10 @@ class WhatsAppCodexApp {
     try {
       if (this.sessionManager) {
         this.sessionManager.destroy();
+      }
+
+      if (this.outboxDispatcher) {
+        await this.outboxDispatcher.stop();
       }
 
       if (this.apiServer) {

@@ -4,6 +4,12 @@ import fs from 'fs/promises';
 import path from 'path';
 import logger from '../logger.js';
 import { paths } from '../paths.js';
+import {
+  buildOutboxEnv,
+  createOutboxRequestId,
+  getOutboxPaths,
+  getOutboxPromptInstructions
+} from '../outbox/common.js';
 
 class GeminiProcess extends EventEmitter {
   constructor(id, owner) {
@@ -17,6 +23,8 @@ class GeminiProcess extends EventEmitter {
     this.messageCount = 0;
     this.sessionId = null;
     this.sessionLoaded = false;
+    this.lastExecutionMeta = null;
+    this.outboxPaths = getOutboxPaths();
   }
 
   getSessionStorePath() {
@@ -78,7 +86,9 @@ class GeminiProcess extends EventEmitter {
         '{"title": "Başlık", "steps": ["Adım 1", "Adım 2"], "prompt": "Detaylı talimat", "orchestrator": "codex|claude|gemini"}',
         '```',
         'Bu blok sisteme gönderilecek ve ayrı bir worker işi yapacak. Sen sadece bloğu yaz, işi yapma.',
-        '[ARKA PLAN GÖREVLERİ] bloğu varsa bunları kullanıcıya aynen gösterme, özetle.'
+        '[ARKA PLAN GÖREVLERİ] bloğu varsa bunları kullanıcıya aynen gösterme, özetle.',
+        '',
+        getOutboxPromptInstructions()
       ].join('\n')
     );
   }
@@ -122,7 +132,7 @@ class GeminiProcess extends EventEmitter {
     return this.shouldUseYolo() ? 'yolo' : 'auto_edit';
   }
 
-  async runGemini({ message, images = [] }) {
+  async runGemini({ message, images = [], requestId = null }) {
     const geminiBin = process.env.GEMINI_BIN || 'gemini';
     const model = process.env.GEMINI_MODEL || '';
     const outputFormat = process.env.GEMINI_OUTPUT_FORMAT || 'stream-json';
@@ -162,7 +172,16 @@ class GeminiProcess extends EventEmitter {
     return await new Promise((resolve) => {
       this.process = spawn(geminiBin, args, {
         env: {
-          ...process.env
+          ...process.env,
+          ...buildOutboxEnv({
+            chatId: this.owner,
+            requestId,
+            orchestrator: 'gemini',
+            outboxPaths: this.outboxPaths,
+            extraEnv: {
+              WA_SESSION_ID: this.id
+            }
+          })
         },
         cwd: workdir
       });
@@ -327,6 +346,12 @@ class GeminiProcess extends EventEmitter {
     this.lastActivity = new Date();
     this.state = 'executing';
     this.messageCount++;
+    const requestId = createOutboxRequestId('chat');
+    this.lastExecutionMeta = {
+      requestId,
+      orchestrator: 'gemini',
+      sessionId: this.id
+    };
 
     await this.loadSessionState();
 
@@ -334,7 +359,7 @@ class GeminiProcess extends EventEmitter {
       `Gemini komutu [${this.id}]${this.sessionId ? ` (session ${this.sessionId})` : ''}: ${String(message || '').substring(0, 100)}...`
     );
 
-    return await this.runGemini({ message, images });
+    return await this.runGemini({ message, images, requestId });
   }
 
   getStatus() {

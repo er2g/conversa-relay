@@ -5,6 +5,12 @@ import fs from 'fs/promises';
 import path from 'path';
 import logger from '../logger.js';
 import { paths } from '../paths.js';
+import {
+  buildOutboxEnv,
+  createOutboxRequestId,
+  getOutboxPaths,
+  getOutboxPromptInstructions
+} from '../outbox/common.js';
 
 /**
  * Arka plan görevlerini yöneten sınıf.
@@ -15,6 +21,7 @@ class BackgroundTaskManager extends EventEmitter {
     super();
     this.tasks = new Map(); // taskId -> TaskInfo
     this.storePath = path.join(paths.dataDir, 'background-tasks.json');
+    this.outboxPaths = getOutboxPaths();
   }
 
   async loadTasks() {
@@ -54,7 +61,9 @@ class BackgroundTaskManager extends EventEmitter {
       'Sen bir arka plan görev asistanısın.',
       'Verilen görevi tamamla ve sonucu özetle.',
       'Kısa ve net cevap ver.',
-      'İşlem adımlarını ve sonucu raporla.'
+      'İşlem adımlarını ve sonucu raporla.',
+      '',
+      getOutboxPromptInstructions()
     ].join('\n');
   }
 
@@ -130,6 +139,7 @@ class BackgroundTaskManager extends EventEmitter {
       orchestrator: selectedOrchestrator,
       model: null,
       threadId: null,
+      requestId: createOutboxRequestId('bg'),
       process: null
     };
 
@@ -228,7 +238,18 @@ class BackgroundTaskManager extends EventEmitter {
     );
 
     const proc = spawn(codexBin, args, {
-      env: { ...process.env },
+      env: {
+        ...process.env,
+        ...buildOutboxEnv({
+          chatId: task.owner,
+          requestId: task.requestId,
+          orchestrator: 'codex',
+          outboxPaths: this.outboxPaths,
+          extraEnv: {
+            WA_SESSION_ID: task.id
+          }
+        })
+      },
       cwd: workdir
     });
 
@@ -329,7 +350,18 @@ class BackgroundTaskManager extends EventEmitter {
     ];
 
     const proc = spawn(claudeBin, args, {
-      env: { ...process.env },
+      env: {
+        ...process.env,
+        ...buildOutboxEnv({
+          chatId: task.owner,
+          requestId: task.requestId,
+          orchestrator: 'claude',
+          outboxPaths: this.outboxPaths,
+          extraEnv: {
+            WA_SESSION_ID: task.id
+          }
+        })
+      },
       cwd: workdir
     });
 
@@ -428,7 +460,18 @@ class BackgroundTaskManager extends EventEmitter {
     args.push(fullPrompt);
 
     const proc = spawn(geminiBin, args, {
-      env: { ...process.env },
+      env: {
+        ...process.env,
+        ...buildOutboxEnv({
+          chatId: task.owner,
+          requestId: task.requestId,
+          orchestrator: 'gemini',
+          outboxPaths: this.outboxPaths,
+          extraEnv: {
+            WA_SESSION_ID: task.id
+          }
+        })
+      },
       cwd: workdir
     });
 

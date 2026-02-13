@@ -5,6 +5,12 @@ import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import logger from '../logger.js';
 import { paths } from '../paths.js';
+import {
+  buildOutboxEnv,
+  createOutboxRequestId,
+  getOutboxPaths,
+  getOutboxPromptInstructions
+} from '../outbox/common.js';
 
 /**
  * Claude Code Process Wrapper
@@ -22,6 +28,8 @@ class ClaudeProcess extends EventEmitter {
     this.messageCount = 0;
     this.sessionId = null; // Claude Code session ID (UUID)
     this.sessionLoaded = false;
+    this.lastExecutionMeta = null;
+    this.outboxPaths = getOutboxPaths();
   }
 
   getSessionStorePath() {
@@ -85,7 +93,11 @@ class ClaudeProcess extends EventEmitter {
    * System prompt - Task management ve davranış kuralları
    */
   getSystemPrompt() {
-    return process.env.CLAUDE_SYSTEM_PROMPT || `Sen "Claude Code" - WhatsApp üzerinden erişilen güçlü bir AI asistanısın. Kullanıcıyla Türkçe, samimi ama profesyonel iletişim kuruyorsun.
+    if (process.env.CLAUDE_SYSTEM_PROMPT) {
+      return process.env.CLAUDE_SYSTEM_PROMPT;
+    }
+
+    return `Sen "Claude Code" - WhatsApp üzerinden erişilen güçlü bir AI asistanısın. Kullanıcıyla Türkçe, samimi ama profesyonel iletişim kuruyorsun.
 
 ## SEN KİMSİN
 - Claude Code (Anthropic) - Sonnet 4.5 modeli
@@ -161,13 +173,15 @@ Mesajda [ARKA PLAN GÖREVLERİ] bloğu varsa:
 - İstek gelince hemen harekete geç
 - "Yapamam" demeden önce düşün - muhtemelen yapabilirsin
 - Hata alırsan çözüm öner
-- Kullanıcı dosya gönderirse yolu verilir, işleyebilirsin`;
+- Kullanıcı dosya gönderirse yolu verilir, işleyebilirsin
+
+${getOutboxPromptInstructions()}`;
   }
 
   /**
    * Claude Code CLI'yi çalıştır
    */
-  async runClaude({ message, images = [], isNewSession = false }) {
+  async runClaude({ message, images = [], isNewSession = false, requestId = null }) {
     const model = process.env.CLAUDE_MODEL || 'sonnet';
     const workdir = process.env.CLAUDE_WORKDIR || paths.appRoot;
     const timeoutMs = parseInt(process.env.CLAUDE_TIMEOUT_MS || '300000', 10); // 5 dakika
@@ -195,7 +209,18 @@ Mesajda [ARKA PLAN GÖREVLERİ] bloğu varsa:
       logger.info(`Claude komutu başlatılıyor [${this.id}]${this.sessionId ? ` session=${this.sessionId.substring(0, 8)}...` : ' (yeni)'}`);
 
       this.process = spawn(claudeBin, args, {
-        env: { ...process.env },
+        env: {
+          ...process.env,
+          ...buildOutboxEnv({
+            chatId: this.owner,
+            requestId,
+            orchestrator: 'claude',
+            outboxPaths: this.outboxPaths,
+            extraEnv: {
+              WA_SESSION_ID: this.id
+            }
+          })
+        },
         cwd: workdir
       });
 
@@ -317,6 +342,12 @@ Mesajda [ARKA PLAN GÖREVLERİ] bloğu varsa:
     this.lastActivity = new Date();
     this.state = 'executing';
     this.messageCount++;
+    const requestId = createOutboxRequestId('chat');
+    this.lastExecutionMeta = {
+      requestId,
+      orchestrator: 'claude',
+      sessionId: this.id
+    };
 
     // Session'ı yükle
     await this.loadSessionState();
@@ -327,7 +358,7 @@ Mesajda [ARKA PLAN GÖREVLERİ] bloğu varsa:
       `Claude komutu [${this.id}]${this.sessionId ? ` (session ${this.sessionId.substring(0, 8)}...)` : ' (yeni session)'}: ${String(message || '').substring(0, 100)}...`
     );
 
-    const response = await this.runClaude({ message, images, isNewSession });
+    const response = await this.runClaude({ message, images, isNewSession, requestId });
 
     // Boş cevap kontrolü
     if (!response || response.trim() === '') {

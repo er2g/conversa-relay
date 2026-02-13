@@ -30,6 +30,9 @@ cp config/sessions.example.json config/sessions.json
 - `ORCHESTRATOR_TYPE` (`claude`, `codex` veya `gemini`)
 - `MAX_MEDIA_MB` (genel medya limiti, varsayılan `8`)
 - `MAX_IMAGE_MEDIA_MB`, `MAX_DOC_MEDIA_MB`, `MAX_AUDIO_MEDIA_MB`, `MAX_VIDEO_MEDIA_MB`
+- `AI_OUTBOX_DIR` (AI mesaj JSON kuyruk dizini, varsayılan `data/ai-outbox`)
+- `AI_OUTBOX_POLL_MS` (outbox tarama aralığı, varsayılan `700`)
+- `AI_OUTBOX_MAX_RETRIES` (gönderim retry sayısı, varsayılan `3`)
 
 ## Çalıştırma
 
@@ -123,6 +126,32 @@ Arka plan ayarlari (opsiyonel):
 - `CODEX_BG_INSTRUCTIONS`, `CODEX_BG_TIMEOUT_MS`
 - `CLAUDE_BG_INSTRUCTIONS`, `CLAUDE_BG_MODEL`, `CLAUDE_BG_TIMEOUT_MS`
 - `GEMINI_BG_INSTRUCTIONS`, `GEMINI_BG_MODEL`, `GEMINI_BG_OUTPUT_FORMAT`, `GEMINI_BG_APPROVAL_MODE`, `GEMINI_BG_YOLO`, `GEMINI_BG_TIMEOUT_MS`
+
+## AI JSON outbox (canli mesaj akisi)
+
+AI mesajlari artik dogrudan WhatsApp'a yazilmaz; once JSON olarak outbox klasorune birakilir, sunucu bu dosyalari WhatsApp'a iletir.
+
+- Pending klasoru: `data/ai-outbox/pending`
+- Basarili dosyalar: `data/ai-outbox/processed`
+- Hatali dosyalar: `data/ai-outbox/failed`
+
+JSON formati (temel):
+
+```json
+{
+  "chatId": "90555...@c.us",
+  "requestId": "chat-...",
+  "type": "start|progress|final|error|info",
+  "text": "Kullaniciya gidecek mesaj",
+  "orchestrator": "codex|claude|gemini"
+}
+```
+
+AI surec icinden hizli mesaj birakmak icin helper:
+
+```bash
+node scripts/ai-outbox-message.js --type progress --text "Adim 2 tamam, testlere geciyorum."
+```
 
 ## Güvenlik notu
 
