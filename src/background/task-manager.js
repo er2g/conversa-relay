@@ -117,6 +117,10 @@ class BackgroundTaskManager extends EventEmitter {
     return this.shouldUseGeminiYolo() ? 'yolo' : 'auto_edit';
   }
 
+  getPrimaryCodexModel() {
+    return process.env.CODEX_MODEL || '5.3-codex';
+  }
+
   /**
    * Yeni bir arka plan görevi başlat
    */
@@ -200,8 +204,8 @@ class BackgroundTaskManager extends EventEmitter {
   startCodexTask({ task, prompt, images, finalize }) {
     const workdir = process.env.CODEX_WORKDIR || paths.appRoot;
     const codexBin = process.env.CODEX_BIN || 'codex';
-    const model = process.env.CODEX_MODEL || 'gpt-5.2';
-    const reasoningEffort = process.env.CODEX_REASONING_EFFORT || 'high';
+    const model = this.getPrimaryCodexModel();
+    const reasoningEffort = process.env.CODEX_REASONING_EFFORT || 'medium';
     const yolo = (process.env.CODEX_YOLO || '1') !== '0';
     const sandboxMode = process.env.CODEX_SANDBOX || 'workspace-write';
     const timeoutMs = parseInt(process.env.CODEX_BG_TIMEOUT_MS || '1800000', 10); // 30 dakika
@@ -319,8 +323,8 @@ class BackgroundTaskManager extends EventEmitter {
     proc.stdin.end();
 
     setTimeout(() => {
-      if (task.process) {
-        task.process.kill('SIGTERM');
+      if (task.process === proc) {
+        proc.kill('SIGTERM');
         void finalize({ status: 'timeout', error: 'Zaman aşımı' });
       }
     }, timeoutMs);
@@ -414,8 +418,8 @@ class BackgroundTaskManager extends EventEmitter {
     proc.stdin.end();
 
     setTimeout(() => {
-      if (task.process) {
-        task.process.kill('SIGTERM');
+      if (task.process === proc) {
+        proc.kill('SIGTERM');
         void finalize({ status: 'timeout', error: 'Zaman aşımı' });
       }
     }, timeoutMs);
@@ -571,8 +575,8 @@ class BackgroundTaskManager extends EventEmitter {
     });
 
     setTimeout(() => {
-      if (task.process) {
-        task.process.kill('SIGTERM');
+      if (task.process === proc) {
+        proc.kill('SIGTERM');
         void finalize({ status: 'timeout', error: 'Zaman aşımı' });
       }
     }, timeoutMs);

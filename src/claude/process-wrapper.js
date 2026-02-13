@@ -113,9 +113,13 @@ class CodexProcess extends EventEmitter {
     return u.length >= 6;
   }
 
-  async runCodex({ mode, message, images = [], requestId = null }) {
-    const model = process.env.CODEX_MODEL || 'gpt-5.2';
-    const reasoningEffort = process.env.CODEX_REASONING_EFFORT || 'high';
+  getPrimaryModel() {
+    return process.env.CODEX_MODEL || '5.3-codex';
+  }
+
+  async runCodex({ mode, message, images = [], requestId = null, modelOverride = null }) {
+    const model = modelOverride || this.getPrimaryModel();
+    const reasoningEffort = process.env.CODEX_REASONING_EFFORT || 'medium';
     const workdir = process.env.CODEX_WORKDIR || paths.appRoot;
     const timeoutMs = parseInt(process.env.CODEX_TIMEOUT_MS || '600000', 10);
     const codexBin = process.env.CODEX_BIN || 'codex';
@@ -273,14 +277,9 @@ class CodexProcess extends EventEmitter {
         if (code === 0) {
           const result = messages.join('\n').trim();
           if (!result) {
-            // agent_message yoksa tool call çıktılarından özet oluştur
             if (commandOutputs.length > 0) {
-              const summary = commandOutputs.map(c => {
-                const status = c.exitCode === 0 ? '✓' : `✗ (${c.exitCode})`;
-                const out = c.output ? `\n${c.output.substring(0, 500)}` : '';
-                return `${status} \`${c.cmd.substring(0, 100)}\`${out}`;
-              }).join('\n\n');
-              resolve(summary.substring(0, 3500));
+              logger.warn('Codex agent_message donmedi; ham komut ciktisi kullaniciya gonderilmeyecek');
+              resolve('');
               return;
             }
             logger.warn('Codex yanıt boş (agent_message yok, tool call yok)');
@@ -346,7 +345,12 @@ class CodexProcess extends EventEmitter {
         'Bu mesaja sadece \"OK\" yaz.'
       ].join('\n');
 
-    await this.runCodex({ mode: 'resume', message: primer, requestId: this.lastExecutionMeta?.requestId || null });
+    await this.runCodex({
+      mode: 'resume',
+      message: primer,
+      requestId: this.lastExecutionMeta?.requestId || null,
+      modelOverride: this.getPrimaryModel()
+    });
     this.threadPrimed = true;
     await this.saveThreadState({ threadId: this.threadId, primed: true });
   }
@@ -380,9 +384,17 @@ class CodexProcess extends EventEmitter {
       `Codex komutu [${this.id}]${this.threadId ? ` (thread ${this.threadId})` : ''}: ${String(message || '').substring(0, 100)}...`
     );
 
+    const primaryModel = this.getPrimaryModel();
+
     if (this.threadId) {
       await this.ensureThreadPrimed();
-      let response = await this.runCodex({ mode: 'resume', message, images, requestId });
+      let response = await this.runCodex({
+        mode: 'resume',
+        message,
+        images,
+        requestId,
+        modelOverride: primaryModel
+      });
 
       if (this.shouldRetry(message, response)) {
         response = await this.runCodex({
@@ -390,14 +402,23 @@ class CodexProcess extends EventEmitter {
           message:
             `Önceki cevabın çok kısa/boş. Lütfen kullanıcı mesajına kısa ama açıklayıcı cevap ver; sadece \"Tamam\" yazma.\n\nKullanıcı mesajı: ${message}`,
           images,
-          requestId
+          requestId,
+          modelOverride: primaryModel
         });
       }
 
       return response;
     }
 
-    return await this.runCodex({ mode: 'new', message, images, requestId });
+    let response = await this.runCodex({
+      mode: 'new',
+      message,
+      images,
+      requestId,
+      modelOverride: primaryModel
+    });
+
+    return response;
   }
 
   getStatus() {
